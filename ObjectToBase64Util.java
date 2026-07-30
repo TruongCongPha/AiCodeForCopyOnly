@@ -29,8 +29,8 @@ public class ObjectToBase64Util {
     /**
      * Returns a shallow copy of obj (same class, built via its no-arg constructor)
      * with every simple-type field copied over and every non-simple-type field
-     * left at its default (null for objects, since the fresh instance never sets
-     * them).
+     * force-set to null, regardless of what the no-arg constructor initialized
+     * it to.
      */
     @SuppressWarnings("unchecked")
     public static <T> T filterSimpleFields(T obj) {
@@ -47,11 +47,15 @@ public class ObjectToBase64Util {
             Class<?> current = clazz;
             while (current != null && current != Object.class) {
                 for (Field field : current.getDeclaredFields()) {
-                    if (Modifier.isStatic(field.getModifiers()) || !isSimpleType(field.getType())) {
+                    if (Modifier.isStatic(field.getModifiers())) {
                         continue;
                     }
                     field.setAccessible(true);
-                    field.set(copy, field.get(obj));
+                    if (isSimpleType(field.getType())) {
+                        field.set(copy, field.get(obj));
+                    } else {
+                        field.set(copy, null);
+                    }
                 }
                 current = current.getSuperclass();
             }
