@@ -26,11 +26,17 @@ public class ObjectToBase64Util {
             || SIMPLE_TYPES.contains(type);
     }
 
+    // Kept in the snapshot even though its type isn't "simple" — needed so
+    // @LocalOverride fields survive the base64 round-trip for restorePreserved().
+    private static boolean shouldPreserve(Field field) {
+        return isSimpleType(field.getType()) || field.isAnnotationPresent(LocalOverride.class);
+    }
+
     /**
      * Returns a shallow copy of obj (same class, built via its no-arg constructor)
-     * with every simple-type field copied over and every non-simple-type field
-     * force-set to null, regardless of what the no-arg constructor initialized
-     * it to.
+     * with every simple-type or @LocalOverride field copied over and everything
+     * else force-set to null, regardless of what the no-arg constructor
+     * initialized it to.
      */
     @SuppressWarnings("unchecked")
     public static <T> T filterSimpleFields(T obj) {
@@ -51,7 +57,7 @@ public class ObjectToBase64Util {
                         continue;
                     }
                     field.setAccessible(true);
-                    if (isSimpleType(field.getType())) {
+                    if (shouldPreserve(field)) {
                         field.set(copy, field.get(obj));
                     } else {
                         field.set(copy, null);
@@ -62,6 +68,41 @@ public class ObjectToBase64Util {
             return copy;
         } catch (ReflectiveOperationException e) {
             throw new RuntimeException("Failed to filter simple fields for " + clazz.getName(), e);
+        }
+    }
+
+    /**
+     * Overlays every @LocalOverride field from stored onto fresh, mutating and
+     * returning fresh. Use this after re-fetching an object from the external
+     * service (CMiC360): stored is the snapshot decoded from the base64 you
+     * saved while the record was pending, fresh is the newly-fetched object.
+     * Fields without @LocalOverride are left exactly as the external service
+     * returned them.
+     */
+    public static <T> T restorePreserved(T stored, T fresh) {
+        if (stored == null || fresh == null) {
+            return fresh;
+        }
+        if (!stored.getClass().equals(fresh.getClass())) {
+            throw new IllegalArgumentException("stored and fresh must be the same class: "
+                + stored.getClass().getName() + " vs " + fresh.getClass().getName());
+        }
+        Class<?> clazz = fresh.getClass();
+        try {
+            Class<?> current = clazz;
+            while (current != null && current != Object.class) {
+                for (Field field : current.getDeclaredFields()) {
+                    if (Modifier.isStatic(field.getModifiers()) || !field.isAnnotationPresent(LocalOverride.class)) {
+                        continue;
+                    }
+                    field.setAccessible(true);
+                    field.set(fresh, field.get(stored));
+                }
+                current = current.getSuperclass();
+            }
+            return fresh;
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException("Failed to restore preserved fields for " + clazz.getName(), e);
         }
     }
 
