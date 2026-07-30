@@ -1,4 +1,6 @@
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -25,63 +27,59 @@ public class ObjectToBase64Util {
     }
 
     /**
-     * Extracts only primitive/wrapper/String/enum/BigDecimal/Date fields from the
-     * object, serializes them to JSON, and Base64-encodes the result.
+     * Returns a shallow copy of obj (same class, built via its no-arg constructor)
+     * with every simple-type field copied over and every non-simple-type field
+     * left at its default (null for objects, since the fresh instance never sets
+     * them).
      */
-    public static Map<String, Object> filterSimpleFields(Object obj) {
-        Map<String, Object> filtered = new LinkedHashMap<>();
-        Class<?> clazz = obj.getClass();
-
-        // Walk up the class hierarchy in case of inherited fields
-        while (clazz != null && clazz != Object.class) {
-            for (Field field : clazz.getDeclaredFields()) {
-                if (isSimpleType(field.getType())) {
-                    field.setAccessible(true);
-                    try {
-                        Object value = field.get(obj);
-                        // Store enums as their name so the JSON stays plain-text
-                        if (value instanceof Enum) {
-                            value = ((Enum<?>) value).name();
-                        }
-                        filtered.put(field.getName(), value);
-                    } catch (IllegalAccessException e) {
-                        throw new RuntimeException("Failed to read field: " + field.getName(), e);
-                    }
-                }
-            }
-            clazz = clazz.getSuperclass();
+    @SuppressWarnings("unchecked")
+    public static <T> T filterSimpleFields(T obj) {
+        if (obj == null) {
+            return null;
         }
-        return filtered;
+        Class<T> clazz = (Class<T>) obj.getClass();
+        try {
+            Constructor<T> noArgCtor = clazz.getDeclaredConstructor();
+            noArgCtor.setAccessible(true);
+            T copy = noArgCtor.newInstance();
+
+            // Walk up the class hierarchy in case of inherited fields
+            Class<?> current = clazz;
+            while (current != null && current != Object.class) {
+                for (Field field : current.getDeclaredFields()) {
+                    if (Modifier.isStatic(field.getModifiers()) || !isSimpleType(field.getType())) {
+                        continue;
+                    }
+                    field.setAccessible(true);
+                    field.set(copy, field.get(obj));
+                }
+                current = current.getSuperclass();
+            }
+            return copy;
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException("Failed to filter simple fields for " + clazz.getName(), e);
+        }
     }
 
     /*
      * ==== Real project version (uncomment once Jackson is on the classpath) ====
-     *
-     * public static String toBase64(Object obj) throws com.fasterxml.jackson.core.JsonProcessingException {
-     *     Map<String, Object> filtered = filterSimpleFields(obj);
-     *     com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-     *     String json = mapper.writeValueAsString(filtered);
-     *     return Base64.getEncoder().encodeToString(json.getBytes(StandardCharsets.UTF_8));
-     * }
-     *
-     * public static Map<String, Object> fromBase64(String base64) throws com.fasterxml.jackson.core.JsonProcessingException {
-     *     byte[] decoded = Base64.getDecoder().decode(base64);
-     *     String json = new String(decoded, StandardCharsets.UTF_8);
-     *     com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-     *     return mapper.readValue(json, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
-     * }
      */
+      public static <T> String toBase64(T obj) throws com.fasterxml.jackson.core.JsonProcessingException {
+          T filtered = filterSimpleFields(obj);
+          com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+          // Fields stay private with no getters, so tell Jackson to read them directly
+          mapper.setVisibility(com.fasterxml.jackson.annotation.PropertyAccessor.FIELD,
+              com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility.ANY);
+          String json = mapper.writeValueAsString(filtered);
+          return Base64.getEncoder().encodeToString(json.getBytes(StandardCharsets.UTF_8));
+      }
+     
+      public static Map<String, Object> fromBase64(String base64) throws com.fasterxml.jackson.core.JsonProcessingException {
+          byte[] decoded = Base64.getDecoder().decode(base64);
+          String json = new String(decoded, StandardCharsets.UTF_8);
+          com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+          return mapper.readValue(json, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+      }
+    
 
-    // ==== Sandbox-only stand-ins so this file compiles/runs without Jackson on the classpath ====
-
-    public static String toBase64(Object obj) {
-        Map<String, Object> filtered = filterSimpleFields(obj);
-        String json = MiniJson.toJson(filtered);
-        return Base64.getEncoder().encodeToString(json.getBytes(StandardCharsets.UTF_8));
-    }
-
-    public static String decodeToJson(String base64) {
-        byte[] decoded = Base64.getDecoder().decode(base64);
-        return new String(decoded, StandardCharsets.UTF_8);
-    }
 }
