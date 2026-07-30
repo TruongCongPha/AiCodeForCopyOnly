@@ -74,11 +74,13 @@ public class ObjectToBase64Util {
           return Base64.getEncoder().encodeToString(json.getBytes(StandardCharsets.UTF_8));
       }
      
-      public static Map<String, Object> fromBase64(String base64) throws com.fasterxml.jackson.core.JsonProcessingException {
+      public static <T> T fromBase64(String base64, Class<T> targetType) throws com.fasterxml.jackson.core.JsonProcessingException {
           byte[] decoded = Base64.getDecoder().decode(base64);
           String json = new String(decoded, StandardCharsets.UTF_8);
           com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-          return mapper.readValue(json, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+          mapper.setVisibility(com.fasterxml.jackson.annotation.PropertyAccessor.FIELD,
+              com.fasterxml.jackson.annotation.JsonAutoDetect.Visibility.ANY);
+          return mapper.readValue(json, targetType);
       }
     
 
