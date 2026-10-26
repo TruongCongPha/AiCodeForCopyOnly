@@ -1,770 +1,763 @@
-# FS → UPS Rate Quote API — SnapLogic Implementation Guide
+# FS_UPS_RateQuote_API — quote pipeline (SnapLogic 4.44.1 GA)
 
-**Pipeline:** `FS_UPS_RateQuote_API` · **Task:** `FS_UPS_RateQuote_API_Task` (Triggered, synchronous) · **Target:** SnapLogic 4.44.1 GA
-**Caller:** Freshservice Custom App (FDK request method, server-side template) · **Auth:** Triggered Task bearer token held in a secure iparam
-**Response mode:** return rates only; nothing is written back to Freshservice
+**Pipeline:** `FS_UPS_RateQuote_API` · **Task:** `FS_UPS_RateQuote_API_Task` (Triggered, synchronous)
+**Caller:** the Freshservice custom app (request template `getQuote`) · **Auth:** Triggered Task bearer token
+**Input:** `{ "ticketId": 46, "requestId": "<uuid>" }` · **Writes:** nothing (read-only, safe to call again)
 
-> Items marked **⚠ Verify** could not be confirmed from vendor docs for this exact release. Check them in Designer/Manager or on the UPS/Freshworks portal before go-live.
+This guide replaces `claude_FS_UPS_RateQuote_API_Pipeline.md` in the project. What changed: the receiver is a Freshservice user picked in a lookup field; the Class is not part of the quote (the label pipeline reads the receiver's department and the Class when it creates the label); Shipper and Ship From are one sender; the response uses the `status` contract from `docs/09-api-contract.md` with a `shipmentSummary` and tagged options.
+
+Status labels used below: **Confirmed** (vendor docs), **Tested** (logic run in Node.js against the exact expressions), **Verify** (check in Designer or the UPS test environment before go-live).
 
 ---
 
-## 1. Solution Overview
+## 1. Solution overview
 
 | Item | Detail |
 |---|---|
-| Business objective | An agent clicks **Get UPS Quote** on a child ticket. The app shows every UPS service with its published rate, negotiated rate and transit time, so the agent can choose a service before the shipment is created. |
-| Input | `POST { "ticketId": 330134 }`, where `ticketId` is the child ticket's display ID |
-| Output | A single JSON envelope: `success`, `httpStatus`, `ticketId`, `requestId`, `data.rates[]` or `error{}` |
-| Dependencies | Freshservice API v2 (Tickets), the UPS OAuth 2.0 client-credentials flow, the UPS Rating API (`Shoptimeintransit`), and a SnapLogic Cloudplex or Groundplex |
-| Writes | None, so the API is idempotent and safe to call repeatedly |
+| Objective | The agent clicks "Get delivery options" on a UPS Shipment Details child ticket and sees every UPS service with charge and arrival |
+| Input | POST body with `ticketId` (the child ticket number) and an optional `requestId` |
+| Output | One JSON envelope: `status` = `ok`, `invalid` or `error`, with options or problems |
+| Calls | Freshservice: requested items and the receiver (requester). UPS: Rating `Shoptimeintransit`. OAuth token handled by the UPS account. No department or Class lookup |
+| Writes | None |
 
-### Where the Ship-To and package data comes from
+### Data flow
 
-The best source is the **child ticket's custom fields**, read with **one** call: `GET /api/v2/tickets/{id}?include=requester`.
+1. Read the child ticket's requested items and pick the UPS Shipment Details item.
+2. Clean and validate the form fields. Stop with `invalid` and a list of problems if anything is missing.
+3. Read the receiver from the lookup field (by ID, or by email if the lookup returns an email) and take the name. Stop with `invalid` if the receiver isn't found or has no name.
+4. Build the UPS rate request (sender = shipper = ship-from, residential flag, weight, ship date) and call UPS.
+5. Turn the rated services into option cards, sort by price, tag "Lowest cost" and "Fastest".
 
-- The Ship-To name, address lines, city, state, ZIP, country and package weight come from the ticket's `custom_fields`. Your invoice shows each shipment going to a specific person and address, and that data belongs to the ticket. The requester profile only has a single free-text address, so it can't be parsed reliably.
-- If the Ship-To name or phone custom fields are empty, the pipeline falls back to the embedded **requester** name and phone.
-- Shipper and Ship-From (for example, Pearce Roseville IT, 9000 Foothills Blvd) are fixed per environment, so they live in an **Expression Library** and are not stored on the ticket.
-- The custom-field API names are **not hard-coded in the pipeline**. They are mapped in `ups_rate_config.expr`. To get your real field names, call `GET /api/v2/ticket_form_fields` once and copy the `name` values.
+The Class and the receiver's department are resolved only by the label pipeline, because they affect the label references and not the price.
 
-Cost: 2 Freshservice API credits (1 for the ticket and 1 for the `requester` embed) and 1 UPS Rating call. The UPS OAuth token is cached and refreshed by the account.
-
----
-
-## 2. Architecture Diagram
+## 2. Architecture diagram
 
 ```text
- Freshservice Custom App (ticket sidebar)
-   client.request.invokeTemplate("getUpsQuote", { body: {"ticketId": 330134} })
-      │  HTTPS POST  Authorization: Bearer <secure iparam>
-      ▼
- SnapLogic Triggered Task  FS_UPS_RateQuote_API_Task   (bearer token validated by platform)
-      │  request body → unconnected input view
-      ▼
- [01] Mapper  Validate Request
-      ▼
- [02] Router  Request Valid?
-      ├─ invalid ──────────────────────────────────────────────► [E1] Mapper 400 Response ─┐
-      ▼ valid                                                                             │
- [03] HTTP Client  FS Get Ticket  (GET /api/v2/tickets/{id}?include=requester)            │
-      ├─ error view ───────────────────────────────────────────► [E2] Mapper FS Error ─────┤
-      ▼                                                                                   │
- [04] Mapper  Extract Ship-To & Package  → [04b] Mapper  Validate Ship-To                │
-      ▼                                                                                   │
- [05] Router  Ship-To Complete?                                                           │
-      ├─ missing fields ───────────────────────────────────────► [E3] Mapper 422 Response ─┤
-      ▼ complete                                                                          │
- [06] Mapper  Build UPS RateRequest                                                       │
-      ▼                                                                                   │
- [07] HTTP Client  UPS Rate Shop  (POST /api/rating/{ver}/Shoptimeintransit, OAuth2)      │
-      ├─ error view ───────────────────────────────────────────► [E4] Mapper UPS Error ────┤
-      ▼                                                                                   │
- [08] Mapper  Normalize Rates                                                             │
-      ▼                                                                                   │
- [09] Router  UPS Success?                                                                │
-      ├─ no rates / ResponseStatus≠1 ──────────────────────────► [E5] Mapper No Rates ─────┤
-      ▼                                                                                   │
- [10] Mapper  Success Response ────────────────────────────────────────────────────────────┤
-                                                                                          ▼
-                                                              [11] Union  Response  (only unconnected output view)
-                                                                                          │
-                                                                        HTTP 200 body: [ { envelope } ]
+ Custom app ──POST {ticketId, requestId}──► Triggered Task FS_UPS_RateQuote_API_Task
+                                              (Authorization: Bearer <task token>)
+ [01] Parse request ► [02] Router ──invalid──► [E1] Invalid request
+   ▼ valid
+ [03] GET requested items ──error──► U1
+ [04] Pick item ► [04a] Read form ► [04b] Validate form ► [05] Router ──invalid──► U2
+   ▼
+ [06] GET receiver ──error──► U1
+ [07] Pick receiver ► [07a] Read receiver ► [07b] Validate ► [08] Router ──invalid──► U2
+   ▼
+ [12] Build rate request ► [13] POST UPS Rating ──error──► [E4] UPS error
+   ▼
+ [14] Build options ► [15] Router ──none──► [E5] No options
+   ▼ ok
+ [16] Success response
+
+ U1 Union (FS error views) ► [E2] Freshservice error
+ U2 Union (validation fails) ► [E3] Invalid shipment
+ [16], [E1], [E2], [E3], [E4], [E5] ► [17] Union Response  (only unconnected output = HTTP response)
 ```
 
-There is exactly **one** unconnected input view (on Snap 01) and **one** unconnected output view (on Snap 11). A Triggered Task returns the documents from the unconnected output view as the response body.
+Exactly one unconnected input view (on 01) and one unconnected output view (on 17). Each request produces exactly one response document (Tested: every scenario returns one document).
 
----
+## 3. Expression libraries
 
-## 3. Prerequisites: Expression Libraries
+All logic lives in two libraries so the Snaps stay short and the label pipeline can reuse them.
 
-Expression Libraries keep every environment-specific value and all reusable logic out of the Snaps. Upload both files to the **project** (or the shared project space) in each environment.
+| File | Contents | Per environment? |
+|---|---|---|
+| `fs_ups_config.expr` | Sender, shipper number, service item ID, Freshservice field keys, Class rule (label pipeline only), limits, defaults, service names, US states | Yes, one copy per environment |
+| `fs_ups_fn.expr` | Functions (clean, pickItem, receiverRef, formProblems, buildRateRequest, option, tag, error mapping, …) | No, identical everywhere |
 
-**Manager → Project → Create → File → Upload.** Then open the pipeline in **Designer → Pipeline Properties → Expression Libraries** and add `ups_rate_config.expr` and `ups_rate_fn.expr`. You reference them as `lib.ups_rate_config.*` and `lib.ups_rate_fn.*`.
+Upload both to the project: **Manager → project → Files → Add**. Then open the pipeline: **Pipeline Properties → Expression Libraries**, add both. Reference them as `lib.fs_ups_config.*` and `lib.fs_ups_fn.*`.
 
-### 3.1 `ups_rate_config.expr` (one copy per environment)
+### 3.1 Fill in `fs_ups_config.expr`
 
-```javascript
-{
-  "shipper": {
-    "name": "Pearce Shipment",
-    "shipperNumber": "2XD198",
-    "address": { "AddressLine": ["9000 Foothills Blvd"], "City": "Roseville", "StateProvinceCode": "CA", "PostalCode": "95747", "CountryCode": "US" }
-  },
-  "shipFrom": {
-    "name": "Pearce Roseville - IT",
-    "address": { "AddressLine": ["9000 Foothills Blvd"], "City": "Roseville", "StateProvinceCode": "CA", "PostalCode": "95747", "CountryCode": "US" }
-  },
-  "fsFields": {
-    "shipToName":   "ship_to_name",
-    "shipToPhone":  "ship_to_phone",
-    "line1":        "ship_to_address_line_1",
-    "line2":        "ship_to_address_line_2",
-    "city":         "ship_to_city",
-    "state":        "ship_to_state",
-    "postal":       "ship_to_zip",
-    "country":      "ship_to_country",
-    "weightLbs":    "package_weight_lbs"
-  },
-  "defaults": { "country": "US", "weightLbs": "5", "packagingCode": "02", "residential": true },
-  "serviceNames": {
-    "01": "UPS Next Day Air", "02": "UPS 2nd Day Air", "03": "UPS Ground", "12": "UPS 3 Day Select",
-    "13": "UPS Next Day Air Saver", "14": "UPS Next Day Air Early", "59": "UPS 2nd Day Air A.M.",
-    "07": "UPS Worldwide Express", "08": "UPS Worldwide Expedited", "11": "UPS Standard",
-    "54": "UPS Worldwide Express Plus", "65": "UPS Worldwide Saver"
-  }
-}
-```
+| Key | What to enter |
+|---|---|
+| `sender.*` | The Roseville address, phone and attention name. **Confirm the ZIP**: the rate sample uses 95678, the invoice shows 95747 |
+| `shipperNumber` | The UPS account number |
+| `fs.serviceItemId` | The `service_item_id` of UPS Shipment Details, copied from `GET /api/v2/tickets/{n}/requested_items`. `null` takes the first item |
+| `fsFields.*` | The real API keys of the service item fields. Read them once from the same call (keys under `custom_fields`) |
+| `classRule.source` | Label pipeline only. `name` (department name is the Class) or `custom_field` (set `customFieldKey`) |
+| `classRule.multiDepartment` | Label pipeline only. `fail` (default) or `first` |
+| `defaults.declaredValue` | `null` sends no declared value. Set `999` if the client confirms |
+| `allowedServiceCodes` | Empty shows every service UPS returns. List codes to restrict |
+| `serviceNames` | Fallback names when UPS sends no description. **Verify** the codes in the UPS appendix |
 
-The `fsFields` values are placeholders. Replace them with your real Freshservice field API names from `GET /api/v2/ticket_form_fields`. Use the CIE/test shipper in Dev and Test, and the production shipper in Prod.
+Field values the pipeline expects from the form: State dropdown values must be 2-letter codes. Delivery type values are `Residential` and `Business` (empty uses `defaults.residential`). Weight is a plain number in lbs. Ship date is a Freshservice date (`YYYY-MM-DD`).
 
-### 3.2 `ups_rate_fn.expr` (identical in every environment)
+### 3.2 Why the libraries look the way they do
 
-```javascript
-{
-  "clean": x => (x == null ? '' : ('' + x).trim()),
+- SnapLogic expressions cannot hold statements, so every function is a single expression (no `return`, no `const`, no blocks). The test script rejects those patterns.
+- No library function calls another library function. Mappers combine them instead.
+- Optional paths use `.get(key, default)`, because plain dot access on a missing key fails.
+- `toArray` handles UPS returning a single `RatedShipment` as an object instead of an array.
+- **Verify:** arrow functions inside an expression library and the `.get`/`.extend` behavior in your 4.44.1 Designer. Run one Validate after uploading.
 
-  "cf": (ticket, key) => ((ticket == null || ticket.get('custom_fields') == null) ? null : ticket.custom_fields.get(key)),
+## 4. Pipeline parameters
 
-  "toArray": x => (x == null ? [] : (x instanceof Array ? x : [x])),
-
-  "validTicketId": x => (('' + x).trim().match(/^[1-9][0-9]{0,11}$/) != null),
-
-  "ymd": d => ((d == null || ('' + d).length != 8) ? null : ('' + d).substring(0, 4) + '-' + ('' + d).substring(4, 6) + '-' + ('' + d).substring(6, 8)),
-
-  "rate": (r, names) => ({
-    "serviceCode": r.Service.Code,
-    "serviceName": names.get(r.Service.Code, 'UPS Service ' + r.Service.Code),
-    "currency": r.get('TotalCharges', {}).get('CurrencyCode'),
-    "publishedRate": r.get('TotalCharges') == null ? null : parseFloat(r.TotalCharges.MonetaryValue),
-    "negotiatedRate": r.get('NegotiatedRateCharges') == null ? null : parseFloat(r.NegotiatedRateCharges.get('TotalCharge', {}).get('MonetaryValue')),
-    "billingWeight": r.get('BillingWeight', {}).get('Weight'),
-    "businessDaysInTransit": r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('BusinessDaysInTransit', r.get('GuaranteedDelivery', {}).get('BusinessDaysInTransit')),
-    "estimatedArrivalDate": r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Date'),
-    "estimatedArrivalTime": r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Time'),
-    "alerts": (r.get('RatedShipmentAlert') == null ? [] : (r.RatedShipmentAlert instanceof Array ? r.RatedShipmentAlert : [r.RatedShipmentAlert])).map(a => a.get('Description'))
-  }),
-
-  "effective": rt => (rt.negotiatedRate != null && !isNaN(rt.negotiatedRate) ? rt.negotiatedRate : rt.publishedRate),
-
-  "httpStatus": e => (e.get('status_code') != null ? parseInt('' + e.status_code, 10) : (('' + e.get('error', '') + ' ' + e.get('reason', '')).match(/status code\s*[=:]?\s*(\d{3})/i) != null ? parseInt((('' + e.get('error', '') + ' ' + e.get('reason', '')).match(/status code\s*[=:]?\s*(\d{3})/i))[1], 10) : null)),
-
-  "upsErrors": ent => ((ent instanceof Object && ent.get('response') instanceof Object && ent.response.get('errors') instanceof Array) ? ent.response.errors : []),
-
-  "fsErrorMsg": ent => (ent instanceof Object ? ent.get('message', ent.get('description', null)) : (ent == null ? null : ('' + ent)))
-}
-```
-
-Notes on why the library is written this way:
-
-- `toArray` handles a known UPS JSON quirk: a repeating element that has only **one** item comes back as an object instead of an array. This applies to `RatedShipment` and `RatedShipmentAlert`. Without `toArray`, `.map()` fails whenever UPS returns a single service.
-- `.get(key, default)` is used for every optional path. Plain dot access on a missing key raises an error in SnapLogic.
-- No library function calls another library function, which avoids any dependency on cross-reference behavior inside a library.
-- `httpStatus`: the error-view document for HTTP errors carries `error`, `reason`, `error_entity` and `original`. The status-code field name is **⚠ Verify**, so the function first reads `status_code` and then falls back to parsing "status code = NNN" from the error text.
-- The logic was unit-tested in Node.js against Shop responses (with an array and with a single object), negotiated and non-negotiated rates, alert objects and arrays, and UPS and Freshservice error bodies. All tests passed. Before go-live, re-run one Validate in Designer, because SnapLogic expression semantics differ from JavaScript in a few places.
-
----
-
-## 4. Pipeline Parameters
-
-Pipeline Properties → Parameters. Set the values per environment on the Task. Do not edit them in the pipeline.
+Set these on the Task per environment, not in the pipeline.
 
 | Parameter | Description | Example | Required | Default |
 |---|---|---|---|---|
-| `fsBaseUrl` | Freshservice tenant URL with no trailing slash | `https://pearce.freshservice.com` | Yes | — |
-| `upsBaseUrl` | UPS host | `https://wwwcie.ups.com` (CIE) / `https://onlinetools.ups.com` (Prod) | Yes | `https://wwwcie.ups.com` |
-| `upsRatingVersion` | Rating API version path segment | `v2409` | Yes | `v2409` |
-| `upsRequestOption` | `Shoptimeintransit` (all services plus transit time), `Shop`, `Rate` or `Ratetimeintransit` | `Shoptimeintransit` | Yes | `Shoptimeintransit` |
-| `upsTransactionSrc` | Value for the UPS `transactionSrc` header | `FS-SnapLogic-Quote` | Yes | `FS-SnapLogic-Quote` |
+| `fsBaseUrl` | Freshservice account URL, no trailing slash | `https://pearce-sandbox.freshservice.com` | Yes | (none) |
+| `upsBaseUrl` | UPS host. Test: wwwcie.ups.com. Production: onlinetools.ups.com | `https://wwwcie.ups.com` | Yes | https://wwwcie.ups.com |
+| `upsRatingVersion` | Rating API version path segment | `v2409` | Yes | v2409 |
+| `upsRequestOption` | Rating request option, used in the URL and the request body | `Shoptimeintransit` | Yes | Shoptimeintransit |
+| `upsTransactionSrc` | Value of the UPS transactionSrc header | `FS-SnapLogic-Quote` | Yes | FS-SnapLogic-Quote |
 
-Credentials are **never** stored in parameters. They live in the two Accounts below.
+Credentials never go in parameters. They live in the accounts below.
 
----
+## 5. Accounts
 
-## 5. Required Accounts
+| Account | Type | Settings | Notes |
+|---|---|---|---|
+| `FS_API_Basic_<ENV>` | API Suite **Basic Authentication Account** | Username = Freshservice API key of an integration agent; Password = `X` | For the quote, the agent's role must read tickets, requested items and requesters. The label pipeline will also read departments. **Verify** with one call each |
+| `UPS_OAuth2_<ENV>` | Your existing UPS OAuth 2.0 client-credentials account | Token URL on `wwwcie.ups.com` (test) or `onlinetools.ups.com` (production) | Reuse the client's account if it already works. **Verify** the same UPS app works in both environments |
 
-### 5.1 `FS_API_Basic` (HTTP Client → **Basic Authentication Account**)
+Use separate accounts for sandbox and production. Rotate the Freshservice API key and the UPS secret on a schedule (for example every 90 days).
 
-| Field | Value |
-|---|---|
-| Label | `FS_API_Basic_<ENV>` |
-| Username | Freshservice API key of a dedicated **integration agent** |
-| Password | `X` (Freshservice ignores it; API-key Basic auth is the only supported Basic scheme) |
+## 6. Snap-by-snap configuration
 
-- **Permissions:** the agent needs a role that can **view tickets** in the groups and workspaces where child tickets live. Read access is enough; no write permissions are needed.
-- **Environment:** use a separate agent and key for the sandbox and for production.
-- **Security:** the account is encrypted at rest by SnapLogic. Rotate the key every 90 days. If the integration agent is deactivated, the key stops working.
+Create the pipeline `FS_UPS_RateQuote_API`, then in **Pipeline Properties**: add both expression libraries (section 3), add the parameters (section 4), and set **Error Pipeline** to your shared error logger if you have one. It only catches unexpected Snap failures; expected errors are handled inline below.
 
-### 5.2 `UPS_OAuth2_CC` (HTTP Client → **OAuth2 Client Credentials Account**)
+### 6.1 Common settings
 
-| Field | Value |
-|---|---|
-| Label | `UPS_OAuth2_CC_<ENV>` |
-| Client ID / Client secret | From the UPS Developer Portal app (the app must have the **Rating** product added) |
-| Token endpoint | `{upsBaseUrl}/security/v1/oauth/token`, entered as a literal (for example `https://wwwcie.ups.com/security/v1/oauth/token`) |
-| Grant type | `client_credentials` |
-| Client authentication | Send the client ID and secret as a **Basic Auth header**. UPS requires `Authorization: Basic base64(id:secret)` and the form body `grant_type=client_credentials` |
-| Token endpoint header (optional) | `x-merchant-id: <shipper number>` |
-| Auto-refresh token | Enabled. UPS tokens last about 4 hours (`expires_in` ≈ 14399 seconds) |
+**Every Mapper:** Null-safe access ☑. Pass through as stated per Snap. A Mapper cannot read its own targets, which is why some steps are split into two or three Mappers.
 
-- ⚠ **Verify** the exact field labels for the OAuth2 Client Credentials Account in the 4.44.1 API Suite.
-- **Fallback** if your build can't send client credentials as a Basic header: create a child pipeline `UPS_Get_Token` with an HTTP Client POST to the token endpoint, using a Basic Authentication Account (ID and secret) and a form-encoded body. Call it with **Pipeline Execute** set to *Reuse executions* and cache the token in an upstream Mapper. Avoid this unless you need it.
-- **Security:** keep separate UPS apps for CIE and production, and rotate the secret in the UPS portal. The shipper number in the expression library is an identifier, not a secret.
+**Every Router:** First match cleared. Each pair of conditions is mutually exclusive, so a document goes to exactly one view.
 
----
+**Every HTTP Client** (API Suite). Field names follow the SnapLogic HTTP Client and REST Snap docs. **Verify** the exact labels in your Designer:
 
-## 6. Pipeline Flow: Snap-by-Snap Configuration
+| Setting | Freshservice calls (03, 06) | UPS rate call (13) |
+|---|---|---|
+| Response entity type | DEFAULT (parses JSON into `$entity`) | DEFAULT |
+| Connection timeout / read timeout | 10 s / 15 s | 10 s / 20 s |
+| Retry policy | Connection errors and status codes 429 and 5xx | Connection errors and status codes 429 and 5xx (rating is read-only, so retrying is safe) |
+| Maximum request attempts | 3 | 2 |
+| Retry request interval | 2 s | 1 s |
+| Normalize URL | ☑ | ☑ |
+| Views → Error | Route Error Data to Error View | Route Error Data to Error View |
 
-**Before you start:** create the pipeline `FS_UPS_RateQuote_API` → **Pipeline Properties**:
+Keep the totals inside the app's request timeout: two Freshservice calls plus one UPS call normally take a few seconds, but retries add up. Measure it in the sandbox (see section 13).
 
-- Add both Expression Libraries.
-- Add the parameters from section 4.
-- Set **Error Pipeline** to your shared `Common_Error_Logger` (if you have one), with the parameter `source = 'FS_UPS_RateQuote_API'`. This catches only unexpected Snap failures; expected errors are handled inline below.
+**Carrying context through HTTP calls.** The design keeps everything in one object, `$ctx`. Each HTTP Client receives `$ctx` and the next Mapper restores it from `$original.ctx`. **Verify `$original`** in Designer preview on 03's output and error view. If your HTTP Client does not include `original`, put a **Copy** before the HTTP Client and a **Join** (Merge) after it, then read `$ctx` instead of `$original.ctx`.
 
-### [01] Mapper — `Validate Request`
+### 6.2 Snaps in execution order
 
-**Purpose:** normalizes the request body and fails fast on a bad `ticketId` before any API call. Its input view stays **unconnected**, so the task feeds it the POST body.
+Snap numbers 09 to 11 are not used. They held the department and Class lookup, which moved to the label pipeline.
 
-1. Drag a **Mapper** onto the canvas and set the label to `01 Validate Request`.
-2. **Views tab:** keep 1 input and 1 output, and leave the input unconnected.
-3. **Null-safe access:** ☑ (a missing `ticketId` becomes null instead of throwing).
-4. **Pass through:** ☐
-5. Mapping table:
+#### [01] Mapper — `01 Parse request`
+
+Reads the POST body. Validates ticketId, keeps or creates a requestId, records today's date in the shipping time zone.
+
+1. Add a **Mapper** and set the label to `01 Parse request`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
 
 | Expression | Target path |
 |---|---|
-| `lib.ups_rate_fn.validTicketId($.get('ticketId', '')) ? parseInt(('' + $.ticketId).trim(), 10) : null` | `$ticketId` |
-| `'' + $.get('ticketId', '')` | `$ticketIdRaw` |
-| `pipe.ruuid` | `$requestId` |
+| `{"ticketIdRaw": lib.fs_ups_fn.clean($.get('ticketId')), "ticketId": lib.fs_ups_fn.validTicketId($.get('ticketId')) ? parseInt(lib.fs_ups_fn.clean($.get('ticketId')), 10) : null, "requestId": lib.fs_ups_fn.safeRequestId($.get('requestId')) != '' ? lib.fs_ups_fn.safeRequestId($.get('requestId')) : pipe.ruuid, "executionId": pipe.ruuid, "today": Date.now().toLocaleDateString({"format": "yyyyMMdd", "timeZone": lib.fs_ups_config.defaults.timeZone}), "stage": "items"}` | `$ctx` |
 
-6. **Error handling (Views → Error):** Stop Pipeline Execution. Unexpected errors go to the Error Pipeline.
+#### [02] Router — `02 Valid request?`
 
-Input `{ "ticketId": 330134 }` → output `{ "ticketId": 330134, "ticketIdRaw": "330134", "requestId": "…" }`.
-Input `{ "ticketId": "abc" }` → output `{ "ticketId": null, … }`.
+1. Add a **Router**, label `02 Valid request?`. Leave **First match** cleared; the conditions are mutually exclusive.
+2. Routes:
 
-### [02] Router — `Request Valid?`
+| Expression | Output view | Connect to |
+|---|---|---|
+| `$ctx.ticketId != null` | `valid` | 03 |
+| `$ctx.ticketId == null` | `invalid` | E1 |
 
-1. Add a **Router** labeled `02 Request Valid?`.
-2. Add two routes:
+#### [03] HTTP Client — `03 FS requested items`
 
-| Expression | Output view |
-|---|---|
-| `$ticketId != null` | `valid` |
-| `$ticketId == null` | `invalid` |
+Reads the requested items of the child ticket.
 
-3. Leave **First Match** cleared. The two conditions are mutually exclusive, so each document goes to exactly one view.
-4. Connect `valid` → [03] and `invalid` → [E1].
-
-### [E1] Mapper — `400 Invalid Request`
-
-| Expression | Target path |
-|---|---|
-| `false` | `$success` |
-| `400` | `$httpStatus` |
-| `null` | `$ticketId` |
-| `$requestId` | `$requestId` |
-| `{ "code": "INVALID_REQUEST", "source": "API", "message": "ticketId is required and must be a positive integer (Freshservice display ID).", "details": [ { "received": $ticketIdRaw } ] }` | `$error` |
-
-Connect its output to Union [11] input0.
-
-### [03] HTTP Client — `FS Get Ticket`
-
-**Purpose:** reads the child ticket and its embedded requester in one call.
-
-1. Add **HTTP Client** (API Suite Snap Pack) labeled `03 FS Get Ticket`.
+1. Add an **HTTP Client** (API Suite Snap Pack), label `03 FS requested items`.
 2. **Account:** `FS_API_Basic_<ENV>`.
 3. **Request method:** `GET`.
-4. **Request URL** (expression ☑): `_fsBaseUrl + '/api/v2/tickets/' + $ticketId`
-5. **Query parameters:** `include` = `requester`
-6. **HTTP headers:** `Accept` = `application/json`
-7. **Retry policy** (⚠ Verify labels): retry on connection errors **and** status `429` / `5xx`; maximum attempts **3**; interval **2 s** with exponential backoff; honor `Retry-After` if your build offers that option. Freshservice returns `Retry-After` on 429.
-8. **Timeouts:** connection 10 s, read 15 s. Keep the total under the FDK request timeout (see section 10).
-9. **Response entity type:** Default (JSON is parsed into `$entity`).
-10. **Views → Error:** **Route Error Data to Error View**, connected to [E2].
+4. **Service URL** (expression ☑): `_fsBaseUrl + '/api/v2/tickets/' + $ctx.ticketId + '/requested_items'`
+5. **HTTP headers:** `Accept` = `'application/json'`.
+6. Apply the common HTTP Client settings in section 6.1.
+7. **Views → Error:** Route Error Data to Error View, connected to U1.
 
-On success the output is `{ statusLine: {statusCode: 200,…}, headers: {…}, entity: { ticket: { id, subject, custom_fields: {…}, requester: { id, name, email, phone, mobile } } } }`.
+#### [04] Mapper — `04 Pick item`
 
-### [E2] Mapper — `FS Error Response`
+Selects the UPS Shipment Details item and restores the context from $original.
 
-The input is the HTTP Client error document (`error`, `reason`, `error_entity`, `original`). `$original` is the document that entered Snap 03, so `ticketId` and `requestId` are still available.
-
-| Expression | Target path |
-|---|---|
-| `false` | `$success` |
-| `lib.ups_rate_fn.httpStatus($) == 404 ? 404 : (lib.ups_rate_fn.httpStatus($) == 401 \|\| lib.ups_rate_fn.httpStatus($) == 403 ? 502 : (lib.ups_rate_fn.httpStatus($) == 429 ? 503 : 502))` | `$httpStatus` |
-| `$original.get('ticketId')` | `$ticketId` |
-| `$original.get('requestId')` | `$requestId` |
-| `{ "code": lib.ups_rate_fn.httpStatus($) == 404 ? "TICKET_NOT_FOUND" : (lib.ups_rate_fn.httpStatus($) == 429 ? "FS_RATE_LIMITED" : "FS_API_ERROR"), "source": "FRESHSERVICE", "upstreamStatus": lib.ups_rate_fn.httpStatus($), "message": lib.ups_rate_fn.fsErrorMsg($.get('error_entity')) != null ? lib.ups_rate_fn.fsErrorMsg($.get('error_entity')) : $.get('reason', $.get('error')) }` | `$error` |
-
-Mapping 401/403 to 502 is deliberate: Freshservice credential problems are a server-side fault, and the agent should not see an authentication error. → Union input1.
-
-### [04] Mapper — `Extract Ship-To & Package`
-
-**Purpose:** flattens and cleans the ticket into a canonical shape. This is the only Snap that knows about Freshservice field names, and it reads them through the config library.
-
-Null-safe access ☑, Pass through ☐.
+1. Add a **Mapper** and set the label to `04 Pick item`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
 
 | Expression | Target path |
 |---|---|
-| `$entity.ticket.id` | `$ticketId` |
-| `pipe.ruuid` | `$requestId` |
-| `$entity.ticket.get('subject')` | `$ticketSubject` |
-| `lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.shipToName)) != '' ? lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.shipToName)) : lib.ups_rate_fn.clean($entity.ticket.get('requester', {}).get('name'))` | `$shipTo.name` |
-| `lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.shipToPhone)) != '' ? lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.shipToPhone)) : lib.ups_rate_fn.clean($entity.ticket.get('requester', {}).get('phone', $entity.ticket.get('requester', {}).get('mobile')))` | `$shipTo.phone` |
-| `lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.line1))` | `$shipTo.line1` |
-| `lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.line2))` | `$shipTo.line2` |
-| `lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.city))` | `$shipTo.city` |
-| `lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.state)).toUpperCase()` | `$shipTo.state` |
-| `lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.postal))` | `$shipTo.postal` |
-| `lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.country)) != '' ? lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.country)).toUpperCase() : lib.ups_rate_config.defaults.country` | `$shipTo.country` |
-| `lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.weightLbs)) != '' ? lib.ups_rate_fn.clean(lib.ups_rate_fn.cf($entity.ticket, lib.ups_rate_config.fsFields.weightLbs)) : lib.ups_rate_config.defaults.weightLbs` | `$pkg.weightLbs` |
+| `$original.ctx.extend({"item": lib.fs_ups_fn.pickItem($entity.get('requested_items'), lib.fs_ups_config.fs.serviceItemId)})` | `$ctx` |
 
-### [04b] Mapper — `Validate Ship-To`
+#### [04a] Mapper — `04a Read form`
 
-Add a second Mapper directly after 04, labeled `04b Validate Ship-To`, with **Pass through ☑** so `$ticketId`, `$requestId`, `$shipTo` and `$pkg` flow on. A separate Mapper is needed because a Mapper can't read its own target paths.
+Turns the item's custom fields into one clean shipment object.
+
+1. Add a **Mapper** and set the label to `04a Read form`.
+2. **Null-safe access:** ☑. **Pass through:** ☑ (keeps $ctx and every other field).
+3. Add these rows (Expression → Target path):
 
 | Expression | Target path |
 |---|---|
-| `[ ['shipToName', $shipTo.name], ['addressLine1', $shipTo.line1], ['city', $shipTo.city], ['state', $shipTo.state], ['postalCode', $shipTo.postal] ].filter(p => p[1] == '').map(p => p[0])` | `$missingFields` |
-| `(isNaN(parseFloat($pkg.weightLbs)) \|\| parseFloat($pkg.weightLbs) <= 0 \|\| parseFloat($pkg.weightLbs) > 150) ? ['packageWeight'] : []` | `$invalidFields` |
+| `{"itemFound": $ctx.item != null, "requestedItemId": $ctx.item == null ? null : $ctx.item.get('id'), "receiverRef": lib.fs_ups_fn.receiverRef(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.receiver)), "phone": lib.fs_ups_fn.normalizePhone(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.phone)), "line1": lib.fs_ups_fn.clean(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.line1)), "line2": lib.fs_ups_fn.clean(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.line2)), "city": lib.fs_ups_fn.clean(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.city)), "state": lib.fs_ups_fn.clean(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.state)).toUpperCase(), "zip": lib.fs_ups_fn.clean(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.zip)), "residential": lib.fs_ups_fn.clean(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.deliveryType)) == '' ? lib.fs_ups_config.defaults.residential : lib.fs_ups_fn.clean(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.deliveryType)).toLowerCase() != 'business', "weight": lib.fs_ups_fn.clean(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.weight)), "shipDate": lib.fs_ups_fn.ymd(lib.fs_ups_fn.cf($ctx.item, lib.fs_ups_config.fsFields.shipDate), $ctx.today)}` | `$ctx.shipment` |
 
-The 150 lb limit is the UPS per-package maximum for small-package services. A heavier package needs UPS freight, which is out of scope here.
+#### [04b] Mapper — `04b Validate form`
 
-The state is required for US, CA and PR addresses. If you ship internationally, make the `state` check conditional: `$shipTo.country == 'US' || $shipTo.country == 'CA' ? … : …`.
+Lists every missing or invalid form field. Sets the stage for error mapping.
 
-### [05] Router — `Ship-To Complete?`
-
-| Expression | Output view |
-|---|---|
-| `$missingFields.length == 0 && $invalidFields.length == 0` | `complete` |
-| `$missingFields.length > 0 \|\| $invalidFields.length > 0` | `incomplete` |
-
-`complete` → [06], `incomplete` → [E3].
-
-### [E3] Mapper — `422 Incomplete Ticket Data`
+1. Add a **Mapper** and set the label to `04b Validate form`.
+2. **Null-safe access:** ☑. **Pass through:** ☑ (keeps $ctx and every other field).
+3. Add these rows (Expression → Target path):
 
 | Expression | Target path |
 |---|---|
-| `false` | `$success` |
-| `422` | `$httpStatus` |
-| `$ticketId` | `$ticketId` |
-| `$requestId` | `$requestId` |
-| `{ "code": "SHIP_TO_INCOMPLETE", "source": "FRESHSERVICE", "message": "The ticket is missing shipping data required for a UPS quote: " + $missingFields.concat($invalidFields).join(', '), "details": [ { "missingFields": $missingFields, "invalidFields": $invalidFields } ] }` | `$error` |
+| `lib.fs_ups_fn.formProblems($ctx.shipment, lib.fs_ups_config, $ctx.today)` | `$ctx.problems` |
+| `'receiver'` | `$ctx.stage` |
 
-This branch saves a UPS call and gives the agent a message they can act on.
+#### [05] Router — `05 Form complete?`
 
-### [06] Mapper — `Build UPS RateRequest`
+1. Add a **Router**, label `05 Form complete?`. Leave **First match** cleared; the conditions are mutually exclusive.
+2. Routes:
 
-Pass through ☐. This builds the body from your **Shipping Rate Example** template, with every literal replaced.
+| Expression | Output view | Connect to |
+|---|---|---|
+| `$ctx.problems.length == 0` | `complete` | 06 |
+| `$ctx.problems.length > 0` | `invalid` | U2 |
+
+#### [06] HTTP Client — `06 FS receiver`
+
+Reads the receiver (requester) by ID, or looks them up by email.
+
+1. Add an **HTTP Client** (API Suite Snap Pack), label `06 FS receiver`.
+2. **Account:** `FS_API_Basic_<ENV>`.
+3. **Request method:** `GET`.
+4. **Service URL** (expression ☑): `lib.fs_ups_fn.requesterUrl(_fsBaseUrl, $ctx.shipment.receiverRef)`
+5. **HTTP headers:** `Accept` = `'application/json'`.
+6. Apply the common HTTP Client settings in section 6.1.
+7. **Views → Error:** Route Error Data to Error View, connected to U1.
+
+#### [07] Mapper — `07 Pick receiver`
+
+Normalizes the two response shapes (by ID or by email) and restores the context.
+
+1. Add a **Mapper** and set the label to `07 Pick receiver`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
 
 | Expression | Target path |
 |---|---|
-| `$ticketId` | `$ticketId` |
-| `$requestId` | `$requestId` |
-| `'FS' + $ticketId + 'T' + Date.now().getTime()` | `$transId` |
-| *(the object below)* | `$rateBody` |
+| `$original.ctx.extend({"requester": lib.fs_ups_fn.requesterFrom($entity)})` | `$ctx` |
 
-`$rateBody` expression:
+#### [07a] Mapper — `07a Read receiver`
 
-```javascript
-{
-  "RateRequest": {
-    "Request": {
-      "RequestOption": _upsRequestOption,
-      "TransactionReference": { "CustomerContext": "FS-TKT-" + $ticketId }
-    },
-    "Shipment": {
-      "Shipper": {
-        "Name": lib.ups_rate_config.shipper.name,
-        "ShipperNumber": lib.ups_rate_config.shipper.shipperNumber,
-        "Address": lib.ups_rate_config.shipper.address
-      },
-      "ShipFrom": {
-        "Name": lib.ups_rate_config.shipFrom.name,
-        "Address": lib.ups_rate_config.shipFrom.address
-      },
-      "ShipTo": {
-        "Name": $shipTo.name.substring(0, 35),
-        "Address": ({
-          "AddressLine": [$shipTo.line1, $shipTo.line2].filter(l => l != '').map(l => l.substring(0, 35)),
-          "City": $shipTo.city,
-          "StateProvinceCode": $shipTo.state,
-          "PostalCode": $shipTo.postal,
-          "CountryCode": $shipTo.country
-        }).extend(lib.ups_rate_config.defaults.residential ? { "ResidentialAddressIndicator": "" } : {})
-      },
-      "PaymentDetails": {
-        "ShipmentCharge": {
-          "Type": "01",
-          "BillShipper": { "AccountNumber": lib.ups_rate_config.shipper.shipperNumber }
-        }
-      },
-      "ShipmentTotalWeight": {
-        "UnitOfMeasurement": { "Code": "LBS", "Description": "Pounds" },
-        "Weight": $pkg.weightLbs
-      },
-      "Package": {
-        "PackagingType": { "Code": lib.ups_rate_config.defaults.packagingCode, "Description": "Package" },
-        "PackageWeight": {
-          "UnitOfMeasurement": { "Code": "LBS", "Description": "Pounds" },
-          "Weight": $pkg.weightLbs
-        }
-      },
-      "DeliveryTimeInformation": { "PackageBillType": "03" },
-      "ShipmentRatingOptions": { "NegotiatedRatesIndicator": "Y" }
-    }
-  }
-}
-```
+Takes the receiver's name and email. The department is not needed for a quote.
 
-Field notes:
+1. Add a **Mapper** and set the label to `07a Read receiver`.
+2. **Null-safe access:** ☑. **Pass through:** ☑ (keeps $ctx and every other field).
+3. Add these rows (Expression → Target path):
 
-- `transId` must be 32 characters or fewer. The pattern `FS` + up to 12 digits + `T` + 13 digits is at most 28.
-- `ShipmentTotalWeight` is used for the time-in-transit calculation, and `DeliveryTimeInformation.PackageBillType` is required for the `*timeintransit` options.
-- `ResidentialAddressIndicator` is a presence flag in UPS (an empty string means present). Your invoice shows *Ground Residential*, so `defaults.residential` is `true`. The `.extend()` adds the key only when the flag is on, so UPS never receives `null`.
-- The UPS rating response doesn't need `Phone`, so it is omitted.
+| Expression | Target path |
+|---|---|
+| `{"found": $ctx.requester != null, "id": $ctx.requester == null ? null : $ctx.requester.get('id'), "name": lib.fs_ups_fn.fullName($ctx.requester), "email": $ctx.requester == null ? null : $ctx.requester.get('primary_email')}` | `$ctx.receiver` |
 
-### [07] HTTP Client — `UPS Rate Shop`
+#### [07b] Mapper — `07b Validate receiver`
 
-1. **Account:** `UPS_OAuth2_CC_<ENV>`
-2. **Request method:** `POST`
-3. **Request URL** (expression ☑): `_upsBaseUrl + '/api/rating/' + _upsRatingVersion + '/' + _upsRequestOption`
-4. **HTTP headers:**
+Checks the receiver was found and has a name.
 
-| Header | Value (expression ☑) |
+1. Add a **Mapper** and set the label to `07b Validate receiver`.
+2. **Null-safe access:** ☑. **Pass through:** ☑ (keeps $ctx and every other field).
+3. Add these rows (Expression → Target path):
+
+| Expression | Target path |
+|---|---|
+| `lib.fs_ups_fn.receiverProblems($ctx.receiver)` | `$ctx.problems` |
+| `'ups'` | `$ctx.stage` |
+
+#### [08] Router — `08 Receiver OK?`
+
+1. Add a **Router**, label `08 Receiver OK?`. Leave **First match** cleared; the conditions are mutually exclusive.
+2. Routes:
+
+| Expression | Output view | Connect to |
+|---|---|---|
+| `$ctx.problems.length == 0` | `ok` | 12 |
+| `$ctx.problems.length > 0` | `invalid` | U2 |
+
+#### [12] Mapper — `12 Build rate request`
+
+Builds the UPS Rating body from the shipment and the config library.
+
+1. Add a **Mapper** and set the label to `12 Build rate request`.
+2. **Null-safe access:** ☑. **Pass through:** ☑ (keeps $ctx and every other field).
+3. Add these rows (Expression → Target path):
+
+| Expression | Target path |
+|---|---|
+| `lib.fs_ups_fn.buildRateRequest($ctx.shipment.extend({"receiverName": $ctx.receiver.name}), lib.fs_ups_config, {"requestOption": _upsRequestOption, "customerContext": $ctx.requestId})` | `$rateBody` |
+| `lib.fs_ups_fn.transId($ctx.requestId)` | `$transId` |
+
+#### [13] HTTP Client — `13 UPS rate`
+
+Calls the UPS Rating API with time in transit.
+
+1. Add an **HTTP Client** (API Suite Snap Pack), label `13 UPS rate`.
+2. **Account:** `UPS_OAuth2_<ENV>`.
+3. **Request method:** `POST`.
+4. **Service URL** (expression ☑): `_upsBaseUrl + '/api/rating/' + _upsRatingVersion + '/' + _upsRequestOption`
+5. **HTTP headers** (values as expressions):
+
+| Key | Value |
 |---|---|
 | `Content-Type` | `'application/json'` |
 | `Accept` | `'application/json'` |
 | `transId` | `$transId` |
 | `transactionSrc` | `_upsTransactionSrc` |
 
-5. **Request body:** `$rateBody`
-6. **Retry policy:** retry on connection errors and status `429` / `500` / `502` / `503`, at most **2** retries with a 1 s interval and exponential backoff. **Never retry 400**, because that is a data error.
-7. **Timeouts:** connection 10 s, read 20 s.
-8. **Views → Error:** Route Error Data to Error View → [E4].
+6. **Request body:** `$rateBody`.
+7. Apply the common HTTP Client settings in section 6.1.
+8. **Views → Error:** Route Error Data to Error View, connected to E4.
 
-### [E4] Mapper — `UPS Error Response`
+#### [14] Mapper — `14 Build options`
 
-| Expression | Target path |
-|---|---|
-| `false` | `$success` |
-| `lib.ups_rate_fn.httpStatus($) == 400 ? 422 : (lib.ups_rate_fn.httpStatus($) == 429 \|\| lib.ups_rate_fn.httpStatus($) == 503 ? 503 : 502)` | `$httpStatus` |
-| `$original.get('ticketId')` | `$ticketId` |
-| `$original.get('requestId')` | `$requestId` |
-| `{ "code": lib.ups_rate_fn.httpStatus($) == 400 ? "UPS_VALIDATION_ERROR" : (lib.ups_rate_fn.httpStatus($) == 401 \|\| lib.ups_rate_fn.httpStatus($) == 403 ? "UPS_AUTH_ERROR" : "UPS_UNAVAILABLE"), "source": "UPS", "upstreamStatus": lib.ups_rate_fn.httpStatus($), "message": lib.ups_rate_fn.upsErrors($.get('error_entity')).length > 0 ? lib.ups_rate_fn.upsErrors($.get('error_entity')).map(e => e.get('message')).join(' \| ') : $.get('reason', $.get('error')), "details": lib.ups_rate_fn.upsErrors($.get('error_entity')) }` | `$error` |
+Turns RatedShipment into option cards: filter, sort by price, tag Lowest cost and Fastest.
 
-UPS error body: `{"response":{"errors":[{"code":"111210","message":"The requested service is unavailable between the selected locations."}]}}`. A UPS 400 (for example an invalid ZIP or state) becomes **422** with UPS's own message, so the agent can fix the ticket fields.
-
-⚠ **Verify** that `error_entity` holds a parsed object for HTTP Client. If it is a string, wrap it in `JSON.parse($.error_entity)` inside a try-safe ternary. Run one call with an invalid ZIP in Designer to confirm.
-
-### [08] Mapper — `Normalize Rates`
+1. Add a **Mapper** and set the label to `14 Build options`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
 
 | Expression | Target path |
 |---|---|
-| `$entity.RateResponse.get('Response', {}).get('ResponseStatus', {}).get('Code')` | `$upsStatusCode` |
-| `$entity.RateResponse.get('Response', {}).get('TransactionReference', {}).get('CustomerContext', '').replace('FS-TKT-', '')` | `$ticketIdEcho` |
-| `lib.ups_rate_fn.toArray($entity.RateResponse.get('RatedShipment')).map(r => lib.ups_rate_fn.rate(r, lib.ups_rate_config.serviceNames)).map(x => x.extend({ "amount": lib.ups_rate_fn.effective(x) })).sort((a, b) => a.amount - b.amount)` | `$rates` |
-| `lib.ups_rate_fn.toArray($entity.RateResponse.get('Response', {}).get('Alert')).map(a => a.get('Description'))` | `$responseAlerts` |
-| `pipe.ruuid` | `$requestId` |
+| `$original.ctx` | `$ctx` |
+| `'' + $entity.get('RateResponse', {}).get('Response', {}).get('ResponseStatus', {}).get('Code', '')` | `$upsStatusCode` |
+| `lib.fs_ups_fn.tag(lib.fs_ups_fn.toArray($entity.get('RateResponse', {}).get('RatedShipment')).map(r => lib.fs_ups_fn.option(r, lib.fs_ups_config)).filter(o => lib.fs_ups_fn.keepOption(o, lib.fs_ups_config.allowedServiceCodes)).sort((a, b) => a.amount - b.amount))` | `$options` |
+| `lib.fs_ups_fn.toArray($entity.get('RateResponse', {}).get('Response', {}).get('Alert')).map(a => a.get('Description'))` | `$alerts` |
 
-`$rates` is sorted cheapest-first by the **effective** price: the negotiated rate when UPS returns one, otherwise the published rate. `ticketIdEcho` relies on UPS echoing `TransactionReference.CustomerContext`. ⚠ **Verify** this in CIE. If UPS doesn't echo it, the FS app already knows the ticket ID, so nothing breaks.
+#### [15] Router — `15 Options found?`
 
-### [09] Router — `UPS Success?`
+1. Add a **Router**, label `15 Options found?`. Leave **First match** cleared; the conditions are mutually exclusive.
+2. Routes:
 
-| Expression | Output view |
-|---|---|
-| `$upsStatusCode == '1' && $rates.length > 0` | `ok` |
-| `!($upsStatusCode == '1' && $rates.length > 0)` | `noRates` |
-
-### [E5] Mapper — `No Rates Response`
-
-| Expression | Target path |
-|---|---|
-| `false` | `$success` |
-| `502` | `$httpStatus` |
-| `$ticketIdEcho != '' ? parseInt($ticketIdEcho, 10) : null` | `$ticketId` |
-| `$requestId` | `$requestId` |
-| `{ "code": "UPS_NO_RATES", "source": "UPS", "message": "UPS returned no rated services for this shipment.", "details": $responseAlerts }` | `$error` |
-
-### [10] Mapper — `Success Response`
-
-| Expression | Target path |
-|---|---|
-| `true` | `$success` |
-| `200` | `$httpStatus` |
-| `$ticketIdEcho != '' ? parseInt($ticketIdEcho, 10) : null` | `$ticketId` |
-| `$requestId` | `$requestId` |
-| `{ "requestOption": _upsRequestOption, "currency": $rates[0].currency, "cheapest": $rates[0], "rates": $rates, "alerts": $responseAlerts, "quotedAt": Date.now() }` | `$data` |
-
-### [11] Union — `Response`
-
-1. Add **Union** labeled `11 Response`. On the Views tab, add input views until there are **6** (E1, E2, E3, E4, E5, 10).
-2. Connect all six branches. **Leave the output unconnected.** This is the task's response.
-
-Because each request carries exactly one document, exactly one envelope reaches the Union.
-
----
-
-## 7. Task, Authentication and Response Contract
-
-### 7.1 Create the Triggered Task
-
-**Manager → project → Create Task → Triggered Task:**
-
-| Setting | Value |
-|---|---|
-| Name | `FS_UPS_RateQuote_API_Task` |
-| Pipeline | `FS_UPS_RateQuote_API` |
-| Snaplex | Cloudplex (public Cloud URL). A Groundplex needs an inbound route that Freshworks servers can reach. |
-| Bearer token | Keep the auto-generated token, or replace it with a 40+ character random value (`openssl rand -hex 32`). **Never clear this field.** A blank token makes the pipeline responsible for authentication. |
-| Pipeline parameters | Set the environment values from section 4 |
-| Timeout | `1` minute. The minimum is 1; it bounds runaway executions. |
-| "Do not start a new execution if one is already running" | **☐ Off.** If this is on, two agents clicking at the same time get **409**. |
-| Debug / record triggers | Off in Prod. Use it in Dev only, because it stores request traces. |
-
-Copy the **Cloud URL**: `https://elastic.snaplogic.com/api/1/rest/slsched/feed/<Org>/<ProjectSpace>/<Project>/FS_UPS_RateQuote_API_Task`. It may be `emea.snaplogic.com` depending on your pod.
-
-### 7.2 Request and response contract
-
-Request:
-
-```http
-POST /api/1/rest/slsched/feed/<Org>/<ProjectSpace>/<Project>/FS_UPS_RateQuote_API_Task
-Authorization: Bearer <task token>
-Content-Type: application/json
-
-{ "ticketId": 330134 }
-```
-
-The response is HTTP **200** and the body is a **JSON array with one envelope**. The real outcome is in `success` and `httpStatus`:
-
-```json
-[{
-  "success": true,
-  "httpStatus": 200,
-  "ticketId": 330134,
-  "requestId": "6f0c…",
-  "data": {
-    "requestOption": "Shoptimeintransit",
-    "currency": "USD",
-    "cheapest": { "serviceCode": "03", "serviceName": "UPS Ground", "publishedRate": 21.72, "negotiatedRate": null, "amount": 21.72, "businessDaysInTransit": "4", "estimatedArrivalDate": "20261030", "alerts": [] },
-    "rates": [ { "serviceCode": "03", "…": "…" }, { "serviceCode": "12", "…": "…" }, { "serviceCode": "01", "…": "…" } ],
-    "alerts": [],
-    "quotedAt": "2026-10-26T08:15:03.112Z"
-  }
-}]
-```
-
-Error example:
-
-```json
-[{ "success": false, "httpStatus": 422, "ticketId": 330134, "requestId": "…",
-   "error": { "code": "SHIP_TO_INCOMPLETE", "source": "FRESHSERVICE", "message": "The ticket is missing shipping data required for a UPS quote: city, postalCode", "details": [ … ] } }]
-```
-
-**Why the envelope always returns 200:** this release doesn't document a native way for a Triggered Task pipeline to set its own HTTP status code. **This behavior is not documented by the vendor and should be verified before implementation.** Platform-level failures still return non-200 codes: **401** for a bad or missing bearer token, and 5xx for an unhandled pipeline failure. The FS app must handle both layers (see 7.4).
-
-### 7.3 Triggered vs Ultra Task
-
-| Criteria | Triggered Task | Ultra Task |
+| Expression | Output view | Connect to |
 |---|---|---|
-| Latency | Pipeline prepares on every call (~1–3 s of overhead) | Pipeline always running (sub-second overhead) |
-| Fit for agent-clicked quotes (low volume) | Good | Overkill |
-| Infrastructure | Cloudplex works as is | Needs FeedMaster and a dedicated Snaplex, plus an additional subscription |
-| Design constraints | None special | Ultra-compatible Snaps only; stricter view rules |
-| Operational overhead | Low | Medium (always-on nodes) |
-| Cost | Included | Extra |
+| `$upsStatusCode == '1' && $options.length > 0` | `ok` | 16 |
+| `!($upsStatusCode == '1' && $options.length > 0)` | `none` | E5 |
 
-**Recommendation:** use a **Triggered Task**. Quotes are on-demand and human-paced, and end-to-end latency (about 3–6 s) fits easily inside the FDK request timeout. Move to an Ultra Task only if the FS app is later embedded in a high-volume, automated flow.
+#### [16] Mapper — `16 Success response`
 
-### 7.4 Freshservice Custom App (FDK, platform 3.0)
+Builds the success envelope the app displays.
 
-`config/iparams.json`:
+1. Add a **Mapper** and set the label to `16 Success response`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
 
-```json
-{
-  "snaplogic_host":   { "display_name": "SnapLogic host", "type": "text", "required": true, "default_value": "elastic.snaplogic.com", "description": "FQDN only, no https://" },
-  "snaplogic_path":   { "display_name": "Task path", "type": "text", "required": true, "description": "/api/1/rest/slsched/feed/<Org>/<ProjectSpace>/<Project>/FS_UPS_RateQuote_API_Task" },
-  "snaplogic_token":  { "display_name": "SnapLogic task bearer token", "type": "text", "required": true, "secure": true }
-}
+| Expression | Target path |
+|---|---|
+| `'ok'` | `$status` |
+| `200` | `$httpStatus` |
+| `$ctx.requestId` | `$requestId` |
+| `$ctx.ticketId` | `$ticketId` |
+| `$ctx.executionId` | `$quoteId` |
+| `Date.now()` | `$quotedAt` |
+| `{"receiverName": $ctx.receiver.name, "addressLines": [$ctx.shipment.line1, $ctx.shipment.line2].filter(l => l != ''), "city": $ctx.shipment.city, "state": $ctx.shipment.state, "zip": $ctx.shipment.zip, "residential": $ctx.shipment.residential, "weightLbs": parseFloat($ctx.shipment.weight), "shipDate": lib.fs_ups_fn.isoDate($ctx.shipment.shipDate)}` | `$shipmentSummary` |
+| `$options` | `$options` |
+| `$alerts` | `$alerts` |
+
+#### [E1] Mapper — `E1 Invalid request`
+
+Input: 02 invalid.
+
+1. Add a **Mapper** and set the label to `E1 Invalid request`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
+
+| Expression | Target path |
+|---|---|
+| `'invalid'` | `$status` |
+| `400` | `$httpStatus` |
+| `'INVALID_REQUEST'` | `$code` |
+| `'Send ticketId as a positive whole number.'` | `$message` |
+| `false` | `$retryable` |
+| `$ctx.requestId` | `$requestId` |
+| `null` | `$ticketId` |
+| `[{"field": "ticketId", "message": "Send ticketId as a positive whole number."}]` | `$problems` |
+
+#### [U1] Union — `U1 FS errors`
+
+Collects the Freshservice error views into one input.
+
+Inputs: error views of 03 and 06. Output → E2.
+
+#### [E2] Mapper — `E2 Freshservice error`
+
+Input: U1.
+
+1. Add a **Mapper** and set the label to `E2 Freshservice error`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
+
+| Expression | Target path |
+|---|---|
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).status` | `$status` |
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).httpStatus` | `$httpStatus` |
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).code` | `$code` |
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).message` | `$message` |
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).retryable` | `$retryable` |
+| `$original.ctx.requestId` | `$requestId` |
+| `$original.ctx.ticketId` | `$ticketId` |
+| `{"source": "FRESHSERVICE", "stage": $original.ctx.stage, "upstreamStatus": lib.fs_ups_fn.httpStatus($), "detail": lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).detail}` | `$error` |
+
+#### [U2] Union — `U2 Invalid shipment`
+
+Collects the validation failures into one input.
+
+Inputs: invalid routes of 05 and 08. Output → E3.
+
+#### [E3] Mapper — `E3 Invalid shipment`
+
+Input: U2.
+
+1. Add a **Mapper** and set the label to `E3 Invalid shipment`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
+
+| Expression | Target path |
+|---|---|
+| `'invalid'` | `$status` |
+| `422` | `$httpStatus` |
+| `$ctx.problems.filter(p => p.field == 'item').length > 0 ? 'NOT_A_UPS_TICKET' : 'INVALID_SHIPMENT'` | `$code` |
+| `$ctx.problems.map(p => p.message).join(' ')` | `$message` |
+| `false` | `$retryable` |
+| `$ctx.requestId` | `$requestId` |
+| `$ctx.ticketId` | `$ticketId` |
+| `$ctx.problems` | `$problems` |
+
+#### [E4] Mapper — `E4 UPS error`
+
+Input: 13 error view.
+
+1. Add a **Mapper** and set the label to `E4 UPS error`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
+
+| Expression | Target path |
+|---|---|
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).status` | `$status` |
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).httpStatus` | `$httpStatus` |
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).code` | `$code` |
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).message` | `$message` |
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).retryable` | `$retryable` |
+| `$original.ctx.requestId` | `$requestId` |
+| `$original.ctx.ticketId` | `$ticketId` |
+| `{"source": "UPS", "upstreamStatus": lib.fs_ups_fn.httpStatus($), "details": lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).details}` | `$error` |
+
+#### [E5] Mapper — `E5 No options`
+
+Input: 15 none.
+
+1. Add a **Mapper** and set the label to `E5 No options`.
+2. **Null-safe access:** ☑. **Pass through:** ☐.
+3. Add these rows (Expression → Target path):
+
+| Expression | Target path |
+|---|---|
+| `'error'` | `$status` |
+| `502` | `$httpStatus` |
+| `'UPS_NO_OPTIONS'` | `$code` |
+| `'UPS returned no delivery options for this shipment.'` | `$message` |
+| `false` | `$retryable` |
+| `$ctx.requestId` | `$requestId` |
+| `$ctx.ticketId` | `$ticketId` |
+| `{"source": "UPS", "upsStatusCode": $upsStatusCode, "details": $alerts}` | `$error` |
+
+#### [17] Union — `17 Response`
+
+Single unconnected output view. The Triggered Task returns its documents as the response body.
+
+Inputs: 16, E1, E2, E3, E4, E5. Leave the output view unconnected.
+
+
+## 7. Triggered Task and authentication
+
+**Manager → project → Create → Triggered Task:**
+
+| Setting | Value | Why |
+|---|---|---|
+| Name | `FS_UPS_RateQuote_API_Task` | Becomes part of the URL. Avoid spaces and special characters; SnapLogic requires encoded characters in task URLs |
+| Pipeline | `FS_UPS_RateQuote_API` | |
+| Snaplex | Cloudplex | Freshworks servers must reach the URL. A Groundplex needs an inbound route |
+| Bearer token | Keep the generated token, or replace it with a long random value (for example `openssl rand -hex 32`). **Never clear it** | Confirmed: callers send it as the HTTP `Authorization` header. A cleared field means the pipeline must authenticate requests itself |
+| Pipeline parameters | Section 4 values for this environment | |
+| Timeout | 1 minute | The minimum. It stops runaway executions |
+| Do not start a new execution if one is already active | **Off** | Confirmed: when on, a second caller gets HTTP 409 |
+| Record triggers / debug | Off in production | Recorded triggers store request data |
+
+After saving, open **Task Details** and copy the **Cloudplex secured URL**. It has the form `https://<pod>.snaplogic.com/api/1/rest/slsched/feed/<Org>/<ProjectSpace>/<Project>/FS_UPS_RateQuote_API_Task` (**Verify** the pod and path on the details page).
+
+Test it before touching the app:
+
+```bash
+curl -s -X POST "<task URL>" \
+  -H "Authorization: Bearer <task token>" \
+  -H "Content-Type: application/json" \
+  -d '{"ticketId": 46, "requestId": "test-0001"}'
 ```
 
-`config/requests.json`:
+### Real HTTP status codes (optional)
+
+By default a Triggered Task returns HTTP 200 with a JSON array of the output documents (Confirmed), so the outcome is in `status` and `httpStatus` inside the envelope. Platform failures still use real codes: 401 for a bad token, 5xx for an unhandled pipeline failure.
+
+If you want real status codes, SnapLogic documents ending the pipeline with a **Document to Binary** Snap and a binary header named `status` holding the HTTP code. Keep the envelope approach for the first release; the app code below handles both, and you can switch later after testing.
+
+## 8. Response contract
+
+The body is a JSON array with one envelope. These examples were produced by the simulation from the exact expressions (options shortened).
+
+**Success**
 
 ```json
-{
-  "getUpsQuote": {
-    "schema": {
-      "method": "POST",
-      "host": "<%= iparam.snaplogic_host %>",
-      "path": "<%= iparam.snaplogic_path %>",
-      "headers": {
-        "Authorization": "Bearer <%= iparam.snaplogic_token %>",
-        "Content-Type": "application/json"
-      }
+[
+  {
+    "status": "ok",
+    "httpStatus": 200,
+    "requestId": "6f0c7a2e-1b2c-4d5e-8f90-0123456789ab",
+    "ticketId": 46,
+    "quoteId": "exec-0001",
+    "quotedAt": "2026-10-22T17:00:00.000Z",
+    "shipmentSummary": {
+      "receiverName": "Jane Sample",
+      "addressLines": [
+        "100 Main St"
+      ],
+      "city": "Longwood",
+      "state": "FL",
+      "zip": "32779",
+      "residential": true,
+      "weightLbs": 5,
+      "shipDate": "2026-10-26"
     },
-    "options": { "retryDelay": 1000, "maxAttempts": 1 }
+    "options": [
+      {
+        "serviceCode": "03",
+        "serviceName": "UPS Ground",
+        "currency": "USD",
+        "publishedAmount": 39.43,
+        "negotiatedAmount": 35.1,
+        "negotiated": true,
+        "amount": 35.1,
+        "arrivalDate": "2026-10-30",
+        "arrivalTime": "23:00",
+        "arrivalKey": "20261030230000",
+        "dayOfWeek": "FRI",
+        "businessDays": "4",
+        "guaranteed": false,
+        "alerts": [
+          "Your invoice may vary from the displayed reference rates"
+        ],
+        "tags": [
+          "Lowest cost"
+        ]
+      },
+      {
+        "...": "two more options"
+      }
+    ],
+    "alerts": [
+      "Your invoice may vary from the displayed reference rates"
+    ]
   }
-}
+]
 ```
 
-`manifest.json` (relevant parts):
+Option fields: `serviceCode`, `serviceName`, `currency`, `amount` (negotiated if UPS returned one, otherwise published), `publishedAmount`, `negotiatedAmount`, `negotiated`, `arrivalDate`, `arrivalTime` (`HH:MM`), `dayOfWeek`, `businessDays`, `guaranteed`, `alerts`, `tags` (`Lowest cost`, `Fastest`). `arrivalKey` is internal (sorting). The app decides how to word `arrivalTime`, for example "End of day" for Ground; **Verify** what UPS returns for Ground in the test environment.
+
+**Invalid form**
 
 ```json
-{
-  "platform-version": "3.0",
-  "modules": {
-    "common": { "requests": { "getUpsQuote": {} } },
-    "service_ticket": { "location": { "ticket_sidebar": { "url": "index.html", "icon": "styles/images/icon.svg" } } }
+[
+  {
+    "status": "invalid",
+    "httpStatus": 422,
+    "code": "INVALID_SHIPMENT",
+    "message": "Enter a 10-digit phone number. Enter a 5-digit ZIP code or ZIP+4.",
+    "retryable": false,
+    "requestId": "exec-0001",
+    "ticketId": 46,
+    "problems": [
+      {
+        "field": "phone",
+        "message": "Enter a 10-digit phone number."
+      },
+      {
+        "field": "zip",
+        "message": "Enter a 5-digit ZIP code or ZIP+4."
+      }
+    ]
+  }
+]
+```
+
+| status | httpStatus | code | Meaning | App shows |
+|---|---|---|---|---|
+| `ok` | 200 | — | Options found | Cards |
+| `invalid` | 400 | `INVALID_REQUEST` | Bad or missing ticketId | Generic error (app bug) |
+| `invalid` | 404 | `TICKET_NOT_FOUND` | Ticket doesn't exist | Message |
+| `invalid` | 422 | `NOT_A_UPS_TICKET` | No UPS Shipment Details item | Message |
+| `invalid` | 422 | `INVALID_SHIPMENT` | Form or receiver problems, listed in `problems[]` | List of fixes |
+| `invalid` | 422 | `RECEIVER_NOT_FOUND` | Receiver lookup failed | Message |
+| `invalid` | 422 | `UPS_VALIDATION` | UPS rejected the data (UPS's own message) | Message |
+| `error` | 502 | `FS_AUTH`, `UPS_AUTH` | Integration credentials problem | "Contact the integration team" |
+| `error` | 503 / 502 | `FS_RATE_LIMITED`, `FS_UNAVAILABLE`, `UPS_UNAVAILABLE` | Temporary (`retryable: true`) | "Try again" button |
+| `error` | 502 | `UPS_NO_OPTIONS` | UPS returned nothing usable | Message |
+
+## 9. Calling it from the custom app
+
+`config/iparams.json` (add):
+
+```json
+"snaplogic_host": { "display_name": "SnapLogic host", "type": "text", "required": true, "description": "Host only, for example elastic.snaplogic.com" },
+"snaplogic_quote_path": { "display_name": "Quote task path", "type": "text", "required": true, "description": "/api/1/rest/slsched/feed/<Org>/<ProjectSpace>/<Project>/FS_UPS_RateQuote_API_Task" },
+"snaplogic_token": { "display_name": "SnapLogic task token", "type": "text", "required": true, "secure": true }
+```
+
+`config/requests.json` (add):
+
+```json
+"getQuote": {
+  "schema": {
+    "method": "POST",
+    "host": "<%= iparam.snaplogic_host %>",
+    "path": "<%= iparam.snaplogic_quote_path %>",
+    "headers": {
+      "Authorization": "Bearer <%= iparam.snaplogic_token %>",
+      "Content-Type": "application/json"
+    }
   },
-  "engines": { "node": "18.20.8", "fdk": "9.4.2" }
+  "options": { "maxAttempts": 1 }
 }
 ```
 
-`app/scripts/app.js` (core call):
+`manifest.json`: add `"getQuote": {}` under `modules.common.requests`.
 
-```javascript
-async function getUpsQuote(client) {
-  const { ticket } = await client.data.get('ticket');
-  const ticketId = ticket.display_id || ticket.id;
+`modal.js` (core call):
+
+```js
+async function getQuote(client, ticketNumber) {
+  const requestId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : String(Date.now());
   try {
-    const res = await client.request.invokeTemplate('getUpsQuote', {
-      body: JSON.stringify({ ticketId })
+    const res = await client.request.invokeTemplate("getQuote", {
+      body: JSON.stringify({ ticketId: ticketNumber, requestId: requestId })
     });
-    const env = JSON.parse(res.response)[0];
-    if (!env || !env.success) {
-      return { ok: false, message: env ? env.error.message : 'Empty response', ref: env && env.requestId };
-    }
-    return { ok: true, rates: env.data.rates, cheapest: env.data.cheapest };
+    const body = JSON.parse(res.response);
+    const envelope = Array.isArray(body) ? body[0] : body;
+    return envelope || { status: "error", message: "Empty response from SnapLogic." };
   } catch (err) {
-    const msg = err.status === 401 ? 'Integration authentication failed - contact IT Integration.'
-              : err.status === 504 || err.status === 502 ? 'Quote service timed out - please retry.'
-              : 'Quote service unavailable (' + err.status + ').';
-    return { ok: false, message: msg };
+    // 401: bad task token. 5xx: pipeline failed. Timeouts also land here.
+    return { status: "error", message: "The quote service didn't respond (" + (err && err.status ? err.status : "no status") + ")." };
   }
 }
 ```
 
-FDK facts that affect this design, from the Freshworks Request Method docs:
+The secure token stays in the request header, which the Freshworks request method allows for secure install settings. `maxAttempts: 1` avoids repeated quotes on slow responses; the pipeline already retries its own calls.
 
-- **Secure iparams are allowed only in `headers`**, which is why the token is placed there. Never put it in the path or query string.
-- `host` must be an FQDN with no protocol.
-- The default request timeout is **15 s**. You can raise it to 20, 25 or 30 s in the app configuration; 20 s is recommended here.
-- The limit is **50 requests per minute per app per account**, which is far above agent click rates.
-- Calls run through the Freshworks proxy, so the token never reaches the browser.
-
-⚠ **Verify** two items. First, in Freshservice the FDK ticket object has both `id` and `display_id`, and the REST API uses the **display** ID. Confirm which one your instance returns. Second, confirm the module name `service_ticket` against your FDK version.
-
----
-
-## 8. Error Handling
+## 10. Error handling summary
 
 | Layer | Condition | Behavior |
 |---|---|---|
-| Platform | Missing or invalid bearer token | SnapLogic returns 401; the pipeline never runs |
-| [01–02] | `ticketId` missing, non-numeric, 0 or longer than 12 digits | Envelope with 400 `INVALID_REQUEST` and no API calls |
-| [03] | Freshservice 404 | Envelope with 404 `TICKET_NOT_FOUND` |
-| [03] | Freshservice 401/403 | Envelope with 502 `FS_API_ERROR`, plus an operations alert (key revoked or role changed) |
-| [03] | Freshservice 429/5xx | Snap retries 3× with backoff, then returns 503 `FS_RATE_LIMITED` / 502 |
-| [05] | Ship-To or weight incomplete | Envelope with 422 `SHIP_TO_INCOMPLETE` listing the fields; no UPS call |
-| [07] | UPS 400 | Envelope with 422 `UPS_VALIDATION_ERROR` carrying the UPS message; no retry |
-| [07] | UPS 401/403 | Envelope with 502 `UPS_AUTH_ERROR`; check the OAuth account or app products |
-| [07] | UPS 429/5xx | Snap retries 2×, then returns 503 `UPS_UNAVAILABLE` |
-| [09] | ResponseStatus ≠ 1 or no RatedShipment | Envelope with 502 `UPS_NO_RATES` |
-| Any Snap | Unexpected failure (expression error, platform) | Pipeline fails; the Error Pipeline logs it and the task returns 5xx; the FS app shows a generic message |
+| Platform | Missing or wrong bearer token | SnapLogic returns 401; the pipeline does not run |
+| 01–02 | ticketId missing, not a number, 0, or over 12 digits | `INVALID_REQUEST`, no calls |
+| 03 | Ticket missing | `TICKET_NOT_FOUND` |
+| 04–05 | No UPS item, or form problems | `NOT_A_UPS_TICKET` or `INVALID_SHIPMENT` with every problem listed |
+| 06–08 | Receiver missing or has no name | `INVALID_SHIPMENT` (or `RECEIVER_NOT_FOUND` on 404). The department is not checked |
+| 03, 06 | Freshservice 401/403, 429, 5xx | Retries per 6.1, then `FS_AUTH`, `FS_RATE_LIMITED` or `FS_UNAVAILABLE` |
+| 13 | UPS 400 | `UPS_VALIDATION` with UPS's message, no retry |
+| 13 | UPS 401/403, 429, 5xx, timeout | Retries per 6.1, then `UPS_AUTH` or `UPS_UNAVAILABLE` |
+| 15 | UPS status not 1, or no usable option | `UPS_NO_OPTIONS` with UPS alerts |
+| Any | Unexpected Snap failure | Error pipeline logs it; the task returns 5xx; the app shows its generic message |
 
-**Logging and correlation:** `requestId` (`pipe.ruuid`) is in every envelope, so support can find the execution in **Manager → Dashboard → Pipeline Executions**. `transId` (`FS<ticket>T<epoch>`) goes to UPS for UPS-side support tickets.
+Every response carries `requestId` (from the app) and `quoteId` (the SnapLogic execution ID), so support can find the run in Monitor.
 
-**Notification:** the Error Pipeline (`Common_Error_Logger`) sends email or Teams alerts for unhandled failures. For handled 502 and 503 envelopes, create a Dashboard alert on task failures, or add a Copy → Filter (`$httpStatus >= 502`) → Email Sender branch after [11] if operations needs per-incident alerts.
+## 11. Performance
 
-**Recovery:** the API is read-only and idempotent, so the agent simply clicks again. No state needs cleaning up.
+- Calls per quote: 2 Freshservice + 1 UPS (plus the OAuth token when it expires).
+- Documents: one small document per request. No pagination, batching or parallel paths needed.
+- Freshservice rate limits apply per account per minute; agent clicks are far below them.
+- Latency: task start, two Freshservice calls in sequence, then one UPS call. If the total is too slow for the app, tune the retry attempts and timeouts in 6.1 first. Keep the data reading in SnapLogic.
 
----
+## 12. Security
 
-## 9. Performance
+- The app holds only the task URL and token, as install settings (token secure). It never sees Freshservice or UPS credentials.
+- Freshservice and UPS credentials live in encrypted SnapLogic accounts, never in parameters or libraries.
+- The pipeline trusts nothing from the body except `ticketId` and `requestId`, both validated and sanitized.
+- Read-only: a repeated quote changes nothing.
+- Separate tasks, tokens and accounts per environment. Debug recording off in production.
+- The receiver's name and address appear in `shipmentSummary` for the agent to confirm. Agents can already see them on the ticket.
 
-- **API calls per quote:** 1 Freshservice call (2 credits) plus 1 UPS call. Token refresh happens about once every 4 hours.
-- **Freshservice rate limits:** the *View Ticket* sub-limit is 50/80/140/160 per minute (Starter/Growth/Pro/Enterprise). Human clicking never approaches it, and `Retry-After` is honored on 429.
-- **Memory:** a single document of a few kilobytes. No pagination, batching or parallelism is needed.
-- **Latency budget:** task start ~1–3 s, Freshservice ~0.3–0.8 s, UPS Shop with time-in-transit ~1–3 s. The total of about 3–6 s fits inside the FDK timeout (raise it to 20 s).
-- **Optimization:** if agents usually need only one service, `Rate` with a fixed `Service.Code` is faster than `Shop`. Keep `Shoptimeintransit` as the default because it gives agents a real choice.
+## 13. Testing
 
----
+**Automated (Node.js 18+), from the repo root:**
 
-## 10. Security
-
-- The bearer token lives in a **secure iparam** and is sent only server-side by FDK. It is never in browser code or query strings.
-- Freshservice and UPS credentials live only in **encrypted SnapLogic Accounts** and are never stored in pipeline parameters.
-- **Least privilege:** the Freshservice integration agent is read-only for tickets, and the UPS app has only the products you use.
-- All traffic uses TLS (HTTPS on SnapLogic, Freshservice and UPS).
-- **Rotation every 90 days:** generate a new task token, update the FS app iparam, then update the Task. Brief overlap isn't supported, so schedule rotation in a low-traffic window.
-- **Environment isolation:** use separate tasks, tokens, accounts, UPS apps (CIE vs Prod) and Freshservice sandbox vs production.
-- **Optional hardening** (if you have API Management): put the task behind an APIM proxy with an IP-restriction policy and request-size limits. You can also add an HMAC-signed body later without changing the contract.
-- Turn off task **Debug** in Prod, because traces would capture request data.
-
----
-
-## 11. Testing Strategy
-
-| # | Input / setup | Expected envelope |
-|---|---|---|
-| T1 | Valid child ticket with full address and weight 5 | `success: true`, 3 or more rates sorted ascending, `cheapest.serviceCode` usually `03` |
-| T2 | `{ "ticketId": "330134" }` (string) | Same as T1 (string is accepted) |
-| T3 | `{}` / `{ "ticketId": "abc" }` / `{ "ticketId": 0 }` | 400 `INVALID_REQUEST` |
-| T4 | Ticket ID that doesn't exist | 404 `TICKET_NOT_FOUND` |
-| T5 | Ticket with blank city and ZIP | 422 `SHIP_TO_INCOMPLETE`, `missingFields: ["city","postalCode"]` |
-| T6 | Weight `"-1"` or `"abc"` | 422, `invalidFields: ["packageWeight"]` |
-| T7 | Blank weight field | Uses `defaults.weightLbs` → success |
-| T8 | Ship-To name blank | Falls back to the requester name → success |
-| T9 | ZIP that doesn't match the state (for example GA + 95678) | 422 `UPS_VALIDATION_ERROR` with the UPS message |
-| T10 | `upsRequestOption = Rate` | Single `RatedShipment` object → still returns `rates[1]` (exercises `toArray`) |
-| T11 | Wrong Freshservice API key in the account | 502 `FS_API_ERROR` |
-| T12 | Wrong UPS secret | 502 `UPS_AUTH_ERROR` |
-| T13 | Missing or wrong bearer token | Platform 401; the FS app shows the auth message |
-| T14 | 10 concurrent calls (k6 or JMeter) | All succeed; no 409 |
-| T15 | Account not negotiated-rate eligible | `negotiatedRate: null`, `amount = publishedRate` |
-
-To test in Designer, drop a **JSON Generator** with `[{"ticketId": 330134}]` temporarily in front of [01], validate, inspect each Snap's preview, then remove it. A pipeline with a connected input won't receive the task body.
-
----
-
-## 12. Deployment
-
-```text
-Development (FS sandbox + UPS CIE) → Testing/UAT (FS sandbox + UPS CIE) → Production (FS prod + UPS onlinetools)
+```bash
+node snaplogic/tests/test_expressions.js        # 27 groups: every library function + syntax check
+node snaplogic/tests/simulate_quote_pipeline.js  # 14 end-to-end scenarios with mocked HTTP responses
 ```
 
-| Artifact | Dev | Test | Prod |
+These prove the logic of the exact expressions in this guide. They do not prove SnapLogic accepts the syntax or that the real APIs return these shapes.
+
+**In Designer:** put a JSON Generator with `[{"ticketId": 46, "requestId": "test-0001"}]` in front of 01, Validate, and check each Snap's preview. Remove the JSON Generator afterwards; a pipeline with a connected input won't receive the task body.
+
+| # | Setup | Expected |
+|---|---|---|
+| T1 | Complete UPS ticket | `ok`, options sorted by price, receiver name in the summary |
+| T2 | `{"ticketId": "abc"}` | `invalid`, `INVALID_REQUEST`, no calls in the run log |
+| T3 | Ticket number that doesn't exist | `TICKET_NOT_FOUND` |
+| T4 | A service request without the UPS item | `NOT_A_UPS_TICKET` |
+| T5 | Wrong phone and empty ZIP | `INVALID_SHIPMENT` listing phone and zip |
+| T6 | Receiver with no department | `ok` (the quote ignores the department) |
+| T7 | Receiver not found (deleted user) | `RECEIVER_NOT_FOUND` |
+| T8 | ZIP that doesn't match the state | `UPS_VALIDATION` with UPS's message |
+| T9 | Wrong UPS secret | `UPS_AUTH` |
+| T10 | Wrong Freshservice key | `FS_AUTH` |
+| T11 | Missing bearer token | HTTP 401 from SnapLogic |
+| T12 | Two agents at once | Both succeed (no 409) |
+| T13 | Time the T1 call | Note it against the app's request timeout |
+
+## 14. Deployment
+
+| Item | Dev | Test | Prod |
 |---|---|---|---|
-| Pipeline `FS_UPS_RateQuote_API` | ✓ | promoted | promoted |
-| `ups_rate_fn.expr` | ✓ | identical | identical |
-| `ups_rate_config.expr` | CIE shipper, sandbox field names | same as Dev | **Prod shipper and field names** |
-| `FS_API_Basic_<ENV>` | sandbox key | sandbox key | prod key |
-| `UPS_OAuth2_CC_<ENV>` | CIE app | CIE app | Prod app, token URL on `onlinetools` |
-| Task `FS_UPS_RateQuote_API_Task` | own token | own token | own token |
-| FS App installation iparams | Dev task path and token | Test | Prod |
+| Pipeline | Built here | Promoted | Promoted |
+| `fs_ups_fn.expr` | ✓ | Same | Same |
+| `fs_ups_config.expr` | Sandbox item ID and field keys, test shipper | Same as Dev | Production item ID, field keys, shipper |
+| `FS_API_Basic_<ENV>` | Sandbox key | Sandbox key | Production key |
+| `UPS_OAuth2_<ENV>` | UPS test environment | UPS test environment | Production |
+| Task and token | Own | Own | Own |
+| `upsBaseUrl` | `https://wwwcie.ups.com` | Same | `https://onlinetools.ups.com` |
+| App install settings | Dev URL and token | Test | Prod |
 
 **Go-live checklist**
 
-- [ ] Real Freshservice custom field names entered in `ups_rate_config.fsFields`
-- [ ] UPS app has the Rating product; Prod credentials are in the Prod account; token endpoint is on `onlinetools.ups.com`
-- [ ] The shipper number is eligible for negotiated rates (otherwise expect `negotiatedRate: null`)
-- [ ] All ⚠ Verify items confirmed: HTTP Client retry labels, error-view status field and `error_entity` type, OAuth2 CC account labels, `CustomerContext` echo, FDK `display_id`, FDK module name
-- [ ] The task's "do not start if running" option is **off**; Debug is **off**
-- [ ] FDK request timeout set to 20 s; the app is validated with `fdk validate`
-- [ ] T1–T15 pass in Test
-- [ ] Error Pipeline alerts route to the operations channel
-- [ ] Token rotation date is on the operations calendar
+- [ ] Real field keys and service item ID in `fs_ups_config.expr`; sender ZIP confirmed
+- [ ] Class rule confirmed with the client (needed for the label pipeline, not the quote)
+- [ ] Every **Verify** item in section 15 checked
+- [ ] Node tests pass; T1–T13 pass in Test
+- [ ] Task "do not start" option off; debug off in Prod
+- [ ] Token rotation date in the operations calendar
 
----
+## 15. What is confirmed and what to verify
 
-## Sources
+**Confirmed (vendor docs):** bearer token in the `Authorization` header; a cleared token means the pipeline authenticates; one unconnected output view returned as a JSON array; a POST object becomes one input document; the "do not start" option returns 409; minimum task timeout 1 minute; the Document to Binary `status` header option; HTTP Client is recommended over REST Snaps; `encodeURIComponent` for URL parts.
 
-- [Freshservice API v2 — View a Ticket, include options, rate limits, authentication](https://api.freshservice.com/)
-- [Freshworks FDK — Request method (templates, secure iparams, timeouts, limits)](https://developers.freshworks.com/docs/app-sdk/v3.0/common/advanced-interfaces/request-method/)
-- [SnapLogic — Triggered Task configuration options (bearer token, timeout, concurrency)](https://docs.snaplogic.com/manager/triggered-task-configuration-options.html)
-- [SnapLogic — Triggered Tasks](https://docs.snaplogic.com/manager/triggered-tasks.html)
-- [SnapLogic — HTTP Client Snap](https://docs.snaplogic.com/snaps/snaps-core/sp-api-suite/http-client.html)
-- [SnapLogic — REST Snap Pack (Not Recommended; use HTTP Client)](https://docs.snaplogic.com/snaps/snaps-core/sp-rest/sp-rest-about.html)
-- [SnapLogic Community — `error_entity` in the REST/HTTP error view](https://community.snaplogic.com/t5/designing-and-running-pipelines/rest-api-service-endpoint-returned-erros-result-status-code-403/td-p/17528)
-- [UPS Developer Portal — Rating API](https://developer.ups.com/)
-- Project docs: *Shipping Rate Example.txt* (RateRequest template), *UPS Shipment sample.png* (Ship-From and service context)
+**Tested (Node.js):** every library function, every Mapper and Router expression, and 14 end-to-end scenarios.
+
+**Verify before go-live:**
+
+1. `$original` on HTTP Client output and error documents, and the error document fields (`error`, `reason`, `error_entity`). If `error_entity` is a string, the UPS and Freshservice messages fall back to generic text.
+2. `Date.now().toLocaleDateString({"format": "yyyyMMdd", "timeZone": ...})` returns `yyyyMMdd`.
+3. Pass-through Mappers writing nested targets such as `$ctx.problems`.
+4. Expression library syntax: arrow functions and `.extend` in 4.44.1. Default `.sort()` on strings sorts ascending.
+5. The Freshservice lookup field value format (ID, email or object) and the requester response shapes (`requester`, `requesters`). Department shapes are checked with the label pipeline.
+6. Freshservice `GET /api/v2/requesters?email=` returns `{ "requesters": [...] }`.
+7. UPS: request option casing (`Shoptimeintransit` in the URL and body; your sample used `shopTimeInTransit`), `DeliveryTimeInformation.Pickup.Date`, `ResidentialAddressIndicator`, and the response leaf names under `TimeInTransit` and `GuaranteedDelivery`.
+8. The service code names in `serviceNames`.
+9. The app's request timeout against the measured T13 time.

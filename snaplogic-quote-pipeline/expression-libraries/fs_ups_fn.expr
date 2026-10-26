@@ -1,0 +1,124 @@
+{
+  "clean": x => (x == null ? '' : ('' + x).trim()),
+
+  "toArray": x => (x == null ? [] : (x instanceof Array ? x : [x])),
+
+  "validTicketId": x => (x != null && ('' + x).trim().match(/^[1-9][0-9]{0,11}$/) != null),
+
+  "safeRequestId": x => (x == null ? '' : ('' + x).replace(/[^A-Za-z0-9-]/g, '').substring(0, 64)),
+
+  "transId": x => (x == null ? '' : ('' + x).replace(/[^A-Za-z0-9]/g, '').substring(0, 32)),
+
+  "pickItem": (items, serviceItemId) => ((items == null || !(items instanceof Array) || items.length == 0) ? null : (serviceItemId == null ? items[0] : (items.filter(i => ('' + i.get('service_item_id')) == ('' + serviceItemId)).length > 0 ? items.filter(i => ('' + i.get('service_item_id')) == ('' + serviceItemId))[0] : null))),
+
+  "cf": (item, key) => ((item == null || key == null || item.get('custom_fields') == null) ? null : item.custom_fields.get(key)),
+
+  "receiverRef": v => ((v instanceof Object && !(v instanceof Array)) ? (v.get('id') != null ? {"kind": "id", "value": ('' + v.id).trim()} : ((v.get('email') != null && ('' + v.email).indexOf('@') > 0) ? {"kind": "email", "value": ('' + v.email).trim().toLowerCase()} : {"kind": "unknown", "value": null})) : ((v == null || ('' + v).trim() == '') ? null : (('' + v).trim().match(/^[0-9]+$/) != null ? {"kind": "id", "value": ('' + v).trim()} : (('' + v).indexOf('@') > 0 ? {"kind": "email", "value": ('' + v).trim().toLowerCase()} : {"kind": "unknown", "value": ('' + v).trim()})))),
+
+  "requesterUrl": (base, ref) => (ref == null ? null : (ref.get('kind') == 'id' ? base + '/api/v2/requesters/' + ref.value : (ref.get('kind') == 'email' ? base + '/api/v2/requesters?email=' + encodeURIComponent(ref.value) : null))),
+
+  "requesterFrom": ent => ((ent == null || !(ent instanceof Object)) ? null : (ent.get('requester') != null ? ent.requester : ((ent.get('requesters') instanceof Array && ent.requesters.length > 0) ? ent.requesters[0] : null))),
+
+  "fullName": r => (r == null ? '' : ((r.get('first_name') == null ? '' : ('' + r.first_name).trim()) + ' ' + (r.get('last_name') == null ? '' : ('' + r.last_name).trim())).trim()),
+
+  "pickDepartment": (r, policy) => (r == null ? {"id": null, "reason": "RECEIVER_NOT_FOUND"} : ((r.get('department_ids') == null || !(r.department_ids instanceof Array) || r.department_ids.length == 0) ? {"id": null, "reason": "NO_DEPARTMENT"} : ((r.department_ids.length > 1 && policy != 'first') ? {"id": null, "reason": "MULTIPLE_DEPARTMENTS"} : {"id": r.department_ids[0], "reason": null}))),
+
+  "classFrom": (dept, rule) => (dept == null ? '' : (rule.get('source') == 'custom_field' ? ((dept.get('custom_fields') == null || rule.get('customFieldKey') == null || dept.custom_fields.get(rule.customFieldKey) == null) ? '' : ('' + dept.custom_fields.get(rule.customFieldKey)).trim()) : (dept.get('name') == null ? '' : ('' + dept.name).trim()))),
+
+  "normalizePhone": x => ((('' + (x == null ? '' : x)).replace(/[^0-9]/g, '').length == 11 && ('' + x).replace(/[^0-9]/g, '').substring(0, 1) == '1') ? ('' + x).replace(/[^0-9]/g, '').substring(1) : ('' + (x == null ? '' : x)).replace(/[^0-9]/g, '')),
+
+  "ymd": (raw, today) => ((raw == null || ('' + raw).trim() == '') ? today : (('' + raw).trim().match(/^[0-9]{4}-[0-9]{2}-[0-9]{2}/) != null ? ('' + raw).trim().substring(0, 10).replace(/-/g, '') : null)),
+
+  "isoDate": d => ((d == null || ('' + d).length != 8) ? null : ('' + d).substring(0, 4) + '-' + ('' + d).substring(4, 6) + '-' + ('' + d).substring(6, 8)),
+
+  "formProblems": (s, cfg, today) => ((s == null || s.get('itemFound') != true) ? [{"field": "item", "message": "This ticket has no UPS Shipment Details item."}] : [
+    [s.get('receiverRef') == null, "receiver", "Pick the receiver."],
+    [s.get('receiverRef') != null && s.receiverRef.get('kind') == 'unknown', "receiver", "The receiver value couldn't be read. Pick the receiver again."],
+    [('' + s.get('phone', '')).length != 10, "phone", "Enter a 10-digit phone number."],
+    [('' + s.get('line1', '')) == '', "addressLine1", "Enter address line 1."],
+    [('' + s.get('line1', '')).length > cfg.limits.addressLineMax, "addressLine1", "Address line 1 is longer than " + cfg.limits.addressLineMax + " characters."],
+    [('' + s.get('line2', '')).length > cfg.limits.addressLineMax, "addressLine2", "Address line 2 is longer than " + cfg.limits.addressLineMax + " characters."],
+    [('' + s.get('city', '')) == '', "city", "Enter the city."],
+    [('' + s.get('city', '')).length > cfg.limits.cityMax, "city", "The city is longer than " + cfg.limits.cityMax + " characters."],
+    [('' + s.get('state', '')) == '' || (',' + cfg.usStates.join(',') + ',').indexOf(',' + s.get('state', '') + ',') < 0, "state", "Pick a valid US state."],
+    [('' + s.get('zip', '')).match(/^[0-9]{5}(-[0-9]{4})?$/) == null, "zip", "Enter a 5-digit ZIP code or ZIP+4."],
+    [('' + s.get('weight', '')).match(/^[0-9]+(\.[0-9]+)?$/) == null || parseFloat(s.get('weight', '0')) <= 0 || parseFloat(s.get('weight', '0')) > cfg.defaults.maxWeightLbs, "weight", "Enter a weight greater than 0 and up to " + cfg.defaults.maxWeightLbs + " lbs."],
+    [s.get('shipDate') == null, "shipDate", "Enter a valid ship date."],
+    [s.get('shipDate') != null && parseInt(s.shipDate, 10) < parseInt(today, 10), "shipDate", "The ship date is in the past."]
+  ].filter(p => p[0]).map(p => ({"field": p[1], "message": p[2]}))),
+
+  "receiverProblems": rcv => [
+    [rcv == null || rcv.get('found') != true, "receiver", "The receiver wasn't found in Freshservice. Pick the receiver again."],
+    [rcv != null && rcv.get('found') == true && ('' + rcv.get('name', '')) == '', "receiver", "The receiver has no name in Freshservice."]
+  ].filter(p => p[0]).map(p => ({"field": p[1], "message": p[2]})),
+
+  "profileProblems": (rcv, classValue, cfg) => [
+    [rcv == null || rcv.get('found') != true, "receiver", "The receiver wasn't found in Freshservice. Pick the receiver again."],
+    [rcv != null && rcv.get('found') == true && ('' + rcv.get('name', '')) == '', "receiver", "The receiver has no name in Freshservice."],
+    [rcv != null && rcv.get('found') == true && rcv.get('departmentReason') == 'NO_DEPARTMENT', "department", "The receiver has no department in Freshservice. Ask an admin to set it."],
+    [rcv != null && rcv.get('found') == true && rcv.get('departmentReason') == 'MULTIPLE_DEPARTMENTS', "department", "The receiver has more than one department. Ask an admin which one to use."],
+    [classValue != null && ('' + classValue) == '', "class", "The receiver's department has no Class."],
+    [classValue != null && ('' + classValue) != '' && (cfg.classRule.prefix + classValue).length > cfg.limits.referenceMax, "class", "The Class is too long for the label reference."]
+  ].filter(p => p[0]).map(p => ({"field": p[1], "message": p[2]})),
+
+  "buildRateRequest": (s, cfg, ctx) => ({
+    "RateRequest": {
+      "Request": {
+        "RequestOption": ctx.requestOption,
+        "TransactionReference": {"CustomerContext": ctx.customerContext}
+      },
+      "Shipment": {
+        "Shipper": {
+          "Name": cfg.sender.name,
+          "ShipperNumber": cfg.shipperNumber,
+          "Address": {"AddressLine": cfg.sender.addressLines, "City": cfg.sender.city, "StateProvinceCode": cfg.sender.state, "PostalCode": cfg.sender.postalCode, "CountryCode": cfg.sender.countryCode}
+        },
+        "ShipFrom": {
+          "Name": cfg.sender.name,
+          "Address": {"AddressLine": cfg.sender.addressLines, "City": cfg.sender.city, "StateProvinceCode": cfg.sender.state, "PostalCode": cfg.sender.postalCode, "CountryCode": cfg.sender.countryCode}
+        },
+        "ShipTo": {
+          "Name": (cfg.defaults.receiverCompany != null && cfg.defaults.receiverCompany != '') ? cfg.defaults.receiverCompany : s.receiverName,
+          "Address": ({"AddressLine": [s.line1, s.line2].filter(l => l != null && l != ''), "City": s.city, "StateProvinceCode": s.state, "PostalCode": s.zip, "CountryCode": cfg.sender.countryCode}).extend(s.residential == true ? {"ResidentialAddressIndicator": ""} : {})
+        },
+        "PaymentDetails": {
+          "ShipmentCharge": {"Type": "01", "BillShipper": {"AccountNumber": cfg.shipperNumber}}
+        },
+        "ShipmentTotalWeight": {"UnitOfMeasurement": {"Code": "LBS", "Description": "Pounds"}, "Weight": '' + parseFloat(s.weight)},
+        "Package": ({
+          "PackagingType": {"Code": cfg.defaults.packagingCode, "Description": "Package"},
+          "PackageWeight": {"UnitOfMeasurement": {"Code": "LBS", "Description": "Pounds"}, "Weight": '' + parseFloat(s.weight)}
+        }).extend(cfg.defaults.declaredValue == null ? {} : {"PackageServiceOptions": {"DeclaredValue": {"CurrencyCode": cfg.defaults.currency, "MonetaryValue": '' + cfg.defaults.declaredValue}}}),
+        "DeliveryTimeInformation": {"PackageBillType": cfg.defaults.packageBillType, "Pickup": {"Date": s.shipDate}},
+        "ShipmentRatingOptions": {"NegotiatedRatesIndicator": "Y"}
+      }
+    }
+  }),
+
+  "option": (r, cfg) => ({
+    "serviceCode": '' + r.get('Service', {}).get('Code', ''),
+    "serviceName": (r.get('Service', {}).get('Description') != null && ('' + r.Service.Description).trim() != '') ? ('' + r.Service.Description).trim() : ((r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('Service', {}).get('Description') != null && ('' + r.TimeInTransit.ServiceSummary.Service.Description).trim() != '') ? ('' + r.TimeInTransit.ServiceSummary.Service.Description).trim() : (cfg.serviceNames.get('' + r.get('Service', {}).get('Code', '')) != null ? cfg.serviceNames.get('' + r.get('Service', {}).get('Code', '')) : 'UPS service ' + r.get('Service', {}).get('Code', ''))),
+    "currency": r.get('TotalCharges', {}).get('CurrencyCode', 'USD'),
+    "publishedAmount": r.get('TotalCharges', {}).get('MonetaryValue') == null ? null : parseFloat(r.TotalCharges.MonetaryValue),
+    "negotiatedAmount": r.get('NegotiatedRateCharges', {}).get('TotalCharge', {}).get('MonetaryValue') == null ? null : parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue),
+    "negotiated": r.get('NegotiatedRateCharges', {}).get('TotalCharge', {}).get('MonetaryValue') != null && !isNaN(parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue)),
+    "amount": (r.get('NegotiatedRateCharges', {}).get('TotalCharge', {}).get('MonetaryValue') != null && !isNaN(parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue))) ? parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue) : (r.get('TotalCharges', {}).get('MonetaryValue') == null ? null : parseFloat(r.TotalCharges.MonetaryValue)),
+    "arrivalDate": (r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Date') == null || ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date).length != 8) ? null : ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date).substring(0, 4) + '-' + ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date).substring(4, 6) + '-' + ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date).substring(6, 8),
+    "arrivalTime": (r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Time') == null || ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Time).length < 4) ? null : ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Time).substring(0, 2) + ':' + ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Time).substring(2, 4),
+    "arrivalKey": (r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Date') == null ? '99999999' : '' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date) + (r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Time') == null ? '235959' : '' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Time),
+    "dayOfWeek": r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('DayOfWeek', null),
+    "businessDays": r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('BusinessDaysInTransit', r.get('GuaranteedDelivery', {}).get('BusinessDaysInTransit', null)),
+    "guaranteed": r.get('GuaranteedDelivery') != null,
+    "alerts": (r.get('RatedShipmentAlert') == null ? [] : (r.RatedShipmentAlert instanceof Array ? r.RatedShipmentAlert : [r.RatedShipmentAlert])).map(a => a.get('Description'))
+  }),
+
+  "keepOption": (o, allowed) => (o.amount != null && !isNaN(o.amount) && o.serviceCode != '' && (allowed == null || allowed.length == 0 || allowed.indexOf(o.serviceCode) >= 0)),
+
+  "tag": options => options.map(o => o.extend({"tags": (o.amount == options[0].amount ? ["Lowest cost"] : []).concat(o.arrivalKey == options.map(x => x.arrivalKey).sort()[0] ? ["Fastest"] : [])})),
+
+  "httpStatus": e => (e.get('status_code') != null ? parseInt('' + e.status_code, 10) : (('' + e.get('error', '') + ' ' + e.get('reason', '')).match(/status code\s*[=:]?\s*(\d{3})/i) != null ? parseInt((('' + e.get('error', '') + ' ' + e.get('reason', '')).match(/status code\s*[=:]?\s*(\d{3})/i))[1], 10) : null)),
+
+  "fsError": (status, stage, ent) => (status == 404 ? (stage == 'items' ? {"status": "invalid", "httpStatus": 404, "code": "TICKET_NOT_FOUND", "message": "This ticket wasn't found in Freshservice.", "retryable": false} : (stage == 'receiver' ? {"status": "invalid", "httpStatus": 422, "code": "RECEIVER_NOT_FOUND", "message": "The receiver wasn't found in Freshservice. Pick the receiver again.", "retryable": false} : {"status": "invalid", "httpStatus": 422, "code": "DEPARTMENT_NOT_FOUND", "message": "The receiver's department wasn't found in Freshservice.", "retryable": false})) : ((status == 401 || status == 403) ? {"status": "error", "httpStatus": 502, "code": "FS_AUTH", "message": "SnapLogic can't read Freshservice. Contact the integration team.", "retryable": false} : (status == 429 ? {"status": "error", "httpStatus": 503, "code": "FS_RATE_LIMITED", "message": "Freshservice is busy. Try again in a minute.", "retryable": true} : {"status": "error", "httpStatus": 502, "code": "FS_UNAVAILABLE", "message": "Freshservice didn't respond. Try again.", "retryable": true}))).extend({"source": "FRESHSERVICE", "stage": stage, "upstreamStatus": status, "detail": (ent instanceof Object ? ent.get('message', ent.get('description', null)) : (ent == null ? null : ('' + ent).substring(0, 500)))}),
+
+  "upsError": (status, ent) => (status == 400 ? {"status": "invalid", "httpStatus": 422, "code": "UPS_VALIDATION", "message": ((ent instanceof Object && ent.get('response') instanceof Object && ent.response.get('errors') instanceof Array && ent.response.errors.length > 0) ? ent.response.errors.map(x => x.get('message')).join(' | ') : "UPS rejected the shipment details."), "retryable": false} : ((status == 401 || status == 403) ? {"status": "error", "httpStatus": 502, "code": "UPS_AUTH", "message": "SnapLogic can't sign in to UPS. Contact the integration team.", "retryable": false} : {"status": "error", "httpStatus": 503, "code": "UPS_UNAVAILABLE", "message": "UPS didn't respond. Try again.", "retryable": true})).extend({"source": "UPS", "upstreamStatus": status, "details": ((ent instanceof Object && ent.get('response') instanceof Object && ent.response.get('errors') instanceof Array) ? ent.response.errors : [])})
+}

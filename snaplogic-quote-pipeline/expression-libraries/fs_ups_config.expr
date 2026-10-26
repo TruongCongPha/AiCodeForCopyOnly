@@ -1,0 +1,60 @@
+{
+  "sender": {
+    "name": "Pearce Roseville - IT",
+    "attentionName": "IT Shipping",
+    "phone": "0000000000",
+    "addressLines": ["9000 Foothills Blvd"],
+    "city": "ROSEVILLE",
+    "state": "CA",
+    "postalCode": "95747",
+    "countryCode": "US"
+  },
+  "shipperNumber": "REPLACE_WITH_SHIPPER_NUMBER",
+  "fs": {
+    "serviceItemId": null
+  },
+  "fsFields": {
+    "receiver": "receiver",
+    "phone": "receiver_phone",
+    "line1": "address_line_1",
+    "line2": "address_line_2",
+    "city": "city",
+    "state": "state",
+    "zip": "zip_code",
+    "deliveryType": "delivery_type",
+    "weight": "package_weight_lbs",
+    "shipDate": "ship_date"
+  },
+  "classRule": {
+    "source": "name",
+    "customFieldKey": null,
+    "prefix": "CLASS: ",
+    "multiDepartment": "fail"
+  },
+  "limits": {
+    "addressLineMax": 35,
+    "cityMax": 30,
+    "referenceMax": 35
+  },
+  "defaults": {
+    "receiverCompany": "PEARCE SERVICES",
+    "residential": true,
+    "packagingCode": "02",
+    "packageBillType": "03",
+    "declaredValue": null,
+    "currency": "USD",
+    "maxWeightLbs": 150,
+    "timeZone": "America/Los_Angeles"
+  },
+  "allowedServiceCodes": [],
+  "serviceNames": {
+    "03": "UPS Ground",
+    "12": "UPS 3 Day Select",
+    "02": "UPS 2nd Day Air",
+    "59": "UPS 2nd Day Air A.M.",
+    "13": "UPS Next Day Air Saver",
+    "01": "UPS Next Day Air",
+    "14": "UPS Next Day Air Early"
+  },
+  "usStates": ["AL","AK","AZ","AR","CA","CO","CT","DE","DC","FL","GA","HI","ID","IL","IN","IA","KS","KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY","NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"]
+}

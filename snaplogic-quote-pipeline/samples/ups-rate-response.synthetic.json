@@ -1,0 +1,61 @@
+{
+  "_note": "Synthetic test data shaped after the UPS Rating API model names (RatedShipment, TotalCharges, NegotiatedRateCharges, TimeInTransit). Not a real UPS response. Replace with a real UPS test-environment response once you have one.",
+  "RateResponse": {
+    "Response": {
+      "ResponseStatus": { "Code": "1", "Description": "Success" },
+      "Alert": [
+        { "Code": "110971", "Description": "Your invoice may vary from the displayed reference rates" }
+      ],
+      "TransactionReference": { "CustomerContext": "req-1" }
+    },
+    "RatedShipment": [
+      {
+        "Service": { "Code": "03", "Description": "" },
+        "RatedShipmentAlert": { "Code": "110971", "Description": "Your invoice may vary from the displayed reference rates" },
+        "BillingWeight": { "UnitOfMeasurement": { "Code": "LBS" }, "Weight": "5.0" },
+        "TotalCharges": { "CurrencyCode": "USD", "MonetaryValue": "39.43" },
+        "NegotiatedRateCharges": { "TotalCharge": { "CurrencyCode": "USD", "MonetaryValue": "35.10" } },
+        "TimeInTransit": {
+          "ServiceSummary": {
+            "Service": { "Description": "UPS Ground" },
+            "EstimatedArrival": {
+              "Arrival": { "Date": "20261030", "Time": "230000" },
+              "BusinessDaysInTransit": "4",
+              "DayOfWeek": "FRI"
+            }
+          }
+        }
+      },
+      {
+        "Service": { "Code": "01", "Description": "" },
+        "TotalCharges": { "CurrencyCode": "USD", "MonetaryValue": "250.75" },
+        "GuaranteedDelivery": { "BusinessDaysInTransit": "1", "DeliveryByTime": "10:30 A.M." },
+        "TimeInTransit": {
+          "ServiceSummary": {
+            "Service": { "Description": "UPS Next Day Air" },
+            "EstimatedArrival": {
+              "Arrival": { "Date": "20261027", "Time": "103000" },
+              "DayOfWeek": "TUE"
+            }
+          }
+        }
+      },
+      {
+        "Service": { "Code": "14", "Description": "" },
+        "TotalCharges": { "CurrencyCode": "USD", "MonetaryValue": "290.58" },
+        "GuaranteedDelivery": { "BusinessDaysInTransit": "1", "DeliveryByTime": "8:00 A.M." },
+        "TimeInTransit": {
+          "ServiceSummary": {
+            "EstimatedArrival": {
+              "Arrival": { "Date": "20261027", "Time": "080000" },
+              "DayOfWeek": "TUE"
+            }
+          }
+        }
+      },
+      {
+        "Service": { "Code": "99", "Description": "" }
+      }
+    ]
+  }
+}

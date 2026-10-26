@@ -1,0 +1,21 @@
+[
+  {
+    "status": "invalid",
+    "httpStatus": 422,
+    "code": "INVALID_SHIPMENT",
+    "message": "Enter a 10-digit phone number. Enter a 5-digit ZIP code or ZIP+4.",
+    "retryable": false,
+    "requestId": "exec-0001",
+    "ticketId": 46,
+    "problems": [
+      {
+        "field": "phone",
+        "message": "Enter a 10-digit phone number."
+      },
+      {
+        "field": "zip",
+        "message": "Enter a 5-digit ZIP code or ZIP+4."
+      }
+    ]
+  }
+]
