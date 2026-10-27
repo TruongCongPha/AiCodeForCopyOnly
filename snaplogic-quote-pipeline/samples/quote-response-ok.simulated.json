@@ -26,7 +26,10 @@
         "publishedAmount": 39.43,
         "negotiatedAmount": 35.1,
         "negotiated": true,
+        "amountSource": "shipment",
         "amount": 35.1,
+        "listAmount": 39.43,
+        "shipmentLevelNegotiated": 35.1,
         "arrivalDate": "2026-10-30",
         "arrivalTime": "23:00",
         "arrivalKey": "20261030230000",
@@ -35,6 +38,9 @@
         "guaranteed": false,
         "alerts": [
           "Your invoice may vary from the displayed reference rates"
+        ],
+        "alertCodes": [
+          "110971"
         ],
         "tags": [
           "Lowest cost"
@@ -47,7 +53,10 @@
         "publishedAmount": 250.75,
         "negotiatedAmount": null,
         "negotiated": false,
+        "amountSource": "published",
         "amount": 250.75,
+        "listAmount": null,
+        "shipmentLevelNegotiated": null,
         "arrivalDate": "2026-10-27",
         "arrivalTime": "10:30",
         "arrivalKey": "20261027103000",
@@ -55,6 +64,7 @@
         "businessDays": "1",
         "guaranteed": true,
         "alerts": [],
+        "alertCodes": [],
         "tags": []
       },
       {
@@ -64,7 +74,10 @@
         "publishedAmount": 290.58,
         "negotiatedAmount": null,
         "negotiated": false,
+        "amountSource": "published",
         "amount": 290.58,
+        "listAmount": null,
+        "shipmentLevelNegotiated": null,
         "arrivalDate": "2026-10-27",
         "arrivalTime": "08:00",
         "arrivalKey": "20261027080000",
@@ -72,6 +85,7 @@
         "businessDays": "1",
         "guaranteed": true,
         "alerts": [],
+        "alertCodes": [],
         "tags": [
           "Fastest"
         ]

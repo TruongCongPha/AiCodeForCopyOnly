@@ -8,7 +8,7 @@
 | `expression-libraries/fs_ups_fn.expr` | Shared functions. Identical in every environment; reused by the label pipeline later |
 | `tests/test_expressions.js` | Tests every library function and rejects syntax SnapLogic expressions don't support |
 | `tests/simulate_quote_pipeline.js` | Runs the pipeline's expressions end to end against mocked Freshservice and UPS responses |
-| `samples/` | Synthetic UPS response used by the tests, and the simulated quote responses shown in the guide |
+| `samples/` | A real UPS RatedShipment (amount checks), a synthetic UPS response, and the simulated quote responses shown in the guide |
 
 Run the checks (Node.js 18 or later) from the repo root:
 

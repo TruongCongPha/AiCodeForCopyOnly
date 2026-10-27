@@ -1,0 +1,55 @@
+{
+  "Service": { "Code": "02", "Description": "" },
+  "Zone": "208",
+  "RatedShipmentAlert": [
+    { "Code": "112237", "Description": "Demand Surcharge - Commercial is applied on Package 0" },
+    { "Code": "110971", "Description": "Your invoice may vary from the displayed reference rates" },
+    { "Code": "110920", "Description": "Ship To Address Classification is changed from Residential to Commercial" }
+  ],
+  "BillingWeight": { "UnitOfMeasurement": { "Code": "LBS", "Description": "Pounds" }, "Weight": "10.0" },
+  "TransportationCharges": { "CurrencyCode": "USD", "MonetaryValue": "173.19" },
+  "BaseServiceCharge": { "CurrencyCode": "USD", "MonetaryValue": "0.00" },
+  "ServiceOptionsCharges": { "CurrencyCode": "USD", "MonetaryValue": "0.00" },
+  "TotalCharges": { "CurrencyCode": "USD", "MonetaryValue": "173.19" },
+  "NegotiatedRateCharges": {
+    "BaseServiceCharge": { "CurrencyCode": "USD", "MonetaryValue": "0.00" },
+    "TotalCharge": { "CurrencyCode": "USD", "MonetaryValue": "171.46" }
+  },
+  "GuaranteedDelivery": { "BusinessDaysInTransit": "2" },
+  "RatedPackage": [
+    {
+      "RateModifier": [ { "ModifierType": "SUI", "ModifierDesc": "Demand Surcharge - Commercial", "Amount": "1.35" } ],
+      "TransportationCharges": { "CurrencyCode": "USD", "MonetaryValue": "173.19" },
+      "BaseServiceCharge": { "CurrencyCode": "USD", "MonetaryValue": "128.87" },
+      "ServiceOptionsCharges": { "CurrencyCode": "USD", "MonetaryValue": "0.00" },
+      "ItemizedCharges": [ { "Code": "375", "CurrencyCode": "USD", "MonetaryValue": "42.97" } ],
+      "TotalCharges": { "CurrencyCode": "USD", "MonetaryValue": "173.19" },
+      "NegotiatedCharges": {
+        "BaseServiceCharge": { "CurrencyCode": "USD", "MonetaryValue": "33.49" },
+        "TransportationCharges": { "CurrencyCode": "USD", "MonetaryValue": "46.34" },
+        "ServiceOptionsCharges": { "CurrencyCode": "USD", "MonetaryValue": "0.00" },
+        "TotalCharge": { "CurrencyCode": "USD", "MonetaryValue": "46.34" },
+        "ItemizedCharges": [ { "Code": "375", "CurrencyCode": "USD", "MonetaryValue": "11.50" } ]
+      },
+      "Weight": "10.0",
+      "BillingWeight": { "UnitOfMeasurement": { "Code": "LBS", "Description": "Pounds" }, "Weight": "10.0" }
+    }
+  ],
+  "TimeInTransit": {
+    "PickupDate": "20261029",
+    "PackageBillType": "03",
+    "Disclaimer": "Services listed as guaranteed are backed by a money-back guarantee for transportation charges only. UPS guarantees the day of delivery for every ground package you ship to any address within all 50 states and Puerto Rico. See Terms and Conditions in the Service Guide for details.",
+    "ServiceSummary": {
+      "Service": { "Description": "UPS 2nd Day Air" },
+      "EstimatedArrival": {
+        "Arrival": { "Date": "20261102", "Time": "230000" },
+        "BusinessDaysInTransit": "2",
+        "Pickup": { "Date": "20261029", "Time": "163000" },
+        "DayOfWeek": "MON",
+        "CustomerCenterCutoff": "143000"
+      },
+      "SaturdayDelivery": "0",
+      "SundayDelivery": "0"
+    }
+  }
+}

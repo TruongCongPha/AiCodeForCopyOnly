@@ -157,7 +157,7 @@ scenario("S1 happy path returns options and summary", () => {
   eq(r.requestId, "6f0c7a2e-1b2c-4d5e-8f90-0123456789ab"); eq(r.quoteId, "exec-0001");
   eq(r.options.map(o => o.serviceCode), ["03", "01", "14"]);
   eq(r.options.map(o => o.tags), [["Lowest cost"], [], ["Fastest"]]);
-  eq(r.options[0].amount, 35.1);
+  eq(r.options[0].amount, 35.1); eq(r.options[0].listAmount, 39.43);
   eq(r.shipmentSummary, {
     receiverName: "Jane Sample", addressLines: ["100 Main St"], city: "Longwood", state: "FL", zip: "32779", residential: true,
     weightLbs: 5, shipDate: "2026-10-26"
@@ -231,6 +231,16 @@ scenario("S14 receiver not found by ID (404)", () => {
 scenario("S13 allowed services filter", () => {
   const r = one(runQuote({ ticketId: 46 }, baseMocks(), c => { c.allowedServiceCodes = ["03"]; }));
   eq(r.options.map(o => o.serviceCode), ["03"]); eq(r.options[0].tags, ["Lowest cost", "Fastest"]);
+});
+
+scenario("S15 real RatedShipment: amounts match the UPS page", () => {
+  const realRated = JSON.parse(fs.readFileSync(path.join(root, "samples", "ups-rated-shipment.real.json"), "utf8"));
+  const body = { RateResponse: { Response: { ResponseStatus: { Code: "1" } }, RatedShipment: [realRated] } };
+  const r = one(runQuote({ ticketId: 46 }, baseMocks({ [UPS_URL]: { status: 200, body } })));
+  eq(r.status, "ok"); eq(r.options.length, 1);
+  const o = r.options[0];
+  eq([o.serviceName, o.amount, o.listAmount, o.arrivalDate, o.arrivalTime], ["UPS 2nd Day Air", 46.34, 173.19, "2026-11-02", "23:00"]);
+  eq(o.tags, ["Lowest cost", "Fastest"]);
 });
 
 // Write example responses for the guide

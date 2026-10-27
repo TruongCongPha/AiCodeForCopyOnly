@@ -45,12 +45,12 @@
     [('' + s.get('weight', '')).match(/^[0-9]+(\.[0-9]+)?$/) == null || parseFloat(s.get('weight', '0')) <= 0 || parseFloat(s.get('weight', '0')) > cfg.defaults.maxWeightLbs, "weight", "Enter a weight greater than 0 and up to " + cfg.defaults.maxWeightLbs + " lbs."],
     [s.get('shipDate') == null, "shipDate", "Enter a valid ship date."],
     [s.get('shipDate') != null && parseInt(s.shipDate, 10) < parseInt(today, 10), "shipDate", "The ship date is in the past."]
-  ].filter(p => p[0]).map(p => ({"field": p[1], "message": p[2]}))),
+  ].filter(p => p[0] == true).map(p => ({"field": p[1], "message": p[2]}))),
 
   "receiverProblems": rcv => [
     [rcv == null || rcv.get('found') != true, "receiver", "The receiver wasn't found in Freshservice. Pick the receiver again."],
     [rcv != null && rcv.get('found') == true && ('' + rcv.get('name', '')) == '', "receiver", "The receiver has no name in Freshservice."]
-  ].filter(p => p[0]).map(p => ({"field": p[1], "message": p[2]})),
+  ].filter(p => p[0] == true).map(p => ({"field": p[1], "message": p[2]})),
 
   "profileProblems": (rcv, classValue, cfg) => [
     [rcv == null || rcv.get('found') != true, "receiver", "The receiver wasn't found in Freshservice. Pick the receiver again."],
@@ -59,7 +59,7 @@
     [rcv != null && rcv.get('found') == true && rcv.get('departmentReason') == 'MULTIPLE_DEPARTMENTS', "department", "The receiver has more than one department. Ask an admin which one to use."],
     [classValue != null && ('' + classValue) == '', "class", "The receiver's department has no Class."],
     [classValue != null && ('' + classValue) != '' && (cfg.classRule.prefix + classValue).length > cfg.limits.referenceMax, "class", "The Class is too long for the label reference."]
-  ].filter(p => p[0]).map(p => ({"field": p[1], "message": p[2]})),
+  ].filter(p => p[0] == true).map(p => ({"field": p[1], "message": p[2]})),
 
   "buildRateRequest": (s, cfg, ctx) => ({
     "RateRequest": {
@@ -79,7 +79,7 @@
         },
         "ShipTo": {
           "Name": (cfg.defaults.receiverCompany != null && cfg.defaults.receiverCompany != '') ? cfg.defaults.receiverCompany : s.receiverName,
-          "Address": ({"AddressLine": [s.line1, s.line2].filter(l => l != null && l != ''), "City": s.city, "StateProvinceCode": s.state, "PostalCode": s.zip, "CountryCode": cfg.sender.countryCode}).extend(s.residential == true ? {"ResidentialAddressIndicator": ""} : {})
+          "Address": ({"AddressLine": [s.line1].filter(l => l != null && l != ''), "City": s.city, "StateProvinceCode": s.state, "PostalCode": s.zip, "CountryCode": cfg.sender.countryCode}).extend(s.residential == true ? {"ResidentialAddressIndicator": ""} : {})
         },
         "PaymentDetails": {
           "ShipmentCharge": {"Type": "01", "BillShipper": {"AccountNumber": cfg.shipperNumber}}
@@ -95,21 +95,29 @@
     }
   }),
 
-  "option": (r, cfg) => ({
+  "published": r => ((r.get('TotalCharges', {}).get('MonetaryValue') == null || isNaN(parseFloat(r.TotalCharges.MonetaryValue))) ? null : parseFloat(r.TotalCharges.MonetaryValue)),
+
+  "negotiated": r => (((r.get('RatedPackage') == null ? [] : (r.RatedPackage instanceof Array ? r.RatedPackage : [r.RatedPackage])).length > 0 && (r.get('RatedPackage') == null ? [] : (r.RatedPackage instanceof Array ? r.RatedPackage : [r.RatedPackage])).filter(p => p.get('NegotiatedCharges', {}).get('TotalCharge', {}).get('MonetaryValue') != null && !isNaN(parseFloat(p.NegotiatedCharges.TotalCharge.MonetaryValue))).length == (r.get('RatedPackage') == null ? [] : (r.RatedPackage instanceof Array ? r.RatedPackage : [r.RatedPackage])).length) ? {"amount": parseInt((r.get('RatedPackage') == null ? [] : (r.RatedPackage instanceof Array ? r.RatedPackage : [r.RatedPackage])).filter(p => p.get('NegotiatedCharges', {}).get('TotalCharge', {}).get('MonetaryValue') != null && !isNaN(parseFloat(p.NegotiatedCharges.TotalCharge.MonetaryValue))).map(p => parseFloat(p.NegotiatedCharges.TotalCharge.MonetaryValue)).reduce((a, b) => a + b, 0) * 100 + 0.5) / 100, "source": "package"} : ((r.get('NegotiatedRateCharges', {}).get('TotalCharge', {}).get('MonetaryValue') != null && !isNaN(parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue))) ? {"amount": parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue), "source": "shipment"} : {"amount": null, "source": null})),
+
+  "option": (r, cfg, neg, pub) => ({
     "serviceCode": '' + r.get('Service', {}).get('Code', ''),
     "serviceName": (r.get('Service', {}).get('Description') != null && ('' + r.Service.Description).trim() != '') ? ('' + r.Service.Description).trim() : ((r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('Service', {}).get('Description') != null && ('' + r.TimeInTransit.ServiceSummary.Service.Description).trim() != '') ? ('' + r.TimeInTransit.ServiceSummary.Service.Description).trim() : (cfg.serviceNames.get('' + r.get('Service', {}).get('Code', '')) != null ? cfg.serviceNames.get('' + r.get('Service', {}).get('Code', '')) : 'UPS service ' + r.get('Service', {}).get('Code', ''))),
     "currency": r.get('TotalCharges', {}).get('CurrencyCode', 'USD'),
-    "publishedAmount": r.get('TotalCharges', {}).get('MonetaryValue') == null ? null : parseFloat(r.TotalCharges.MonetaryValue),
-    "negotiatedAmount": r.get('NegotiatedRateCharges', {}).get('TotalCharge', {}).get('MonetaryValue') == null ? null : parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue),
-    "negotiated": r.get('NegotiatedRateCharges', {}).get('TotalCharge', {}).get('MonetaryValue') != null && !isNaN(parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue)),
-    "amount": (r.get('NegotiatedRateCharges', {}).get('TotalCharge', {}).get('MonetaryValue') != null && !isNaN(parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue))) ? parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue) : (r.get('TotalCharges', {}).get('MonetaryValue') == null ? null : parseFloat(r.TotalCharges.MonetaryValue)),
+    "publishedAmount": pub,
+    "negotiatedAmount": neg.amount,
+    "negotiated": neg.amount != null,
+    "amountSource": neg.amount != null ? neg.source : (pub != null ? 'published' : null),
+    "amount": neg.amount != null ? neg.amount : pub,
+    "listAmount": (neg.amount != null && pub != null && pub > neg.amount) ? pub : null,
+    "shipmentLevelNegotiated": (r.get('NegotiatedRateCharges', {}).get('TotalCharge', {}).get('MonetaryValue') == null || isNaN(parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue))) ? null : parseFloat(r.NegotiatedRateCharges.TotalCharge.MonetaryValue),
     "arrivalDate": (r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Date') == null || ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date).length != 8) ? null : ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date).substring(0, 4) + '-' + ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date).substring(4, 6) + '-' + ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date).substring(6, 8),
     "arrivalTime": (r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Time') == null || ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Time).length < 4) ? null : ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Time).substring(0, 2) + ':' + ('' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Time).substring(2, 4),
     "arrivalKey": (r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Date') == null ? '99999999' : '' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Date) + (r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('Arrival', {}).get('Time') == null ? '235959' : '' + r.TimeInTransit.ServiceSummary.EstimatedArrival.Arrival.Time),
     "dayOfWeek": r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('DayOfWeek', null),
     "businessDays": r.get('TimeInTransit', {}).get('ServiceSummary', {}).get('EstimatedArrival', {}).get('BusinessDaysInTransit', r.get('GuaranteedDelivery', {}).get('BusinessDaysInTransit', null)),
-    "guaranteed": r.get('GuaranteedDelivery') != null,
-    "alerts": (r.get('RatedShipmentAlert') == null ? [] : (r.RatedShipmentAlert instanceof Array ? r.RatedShipmentAlert : [r.RatedShipmentAlert])).map(a => a.get('Description'))
+    "guaranteed": r.get('GuaranteedDelivery', {}).get('DeliveryByTime') != null,
+    "alerts": (r.get('RatedShipmentAlert') == null ? [] : (r.RatedShipmentAlert instanceof Array ? r.RatedShipmentAlert : [r.RatedShipmentAlert])).map(a => a.get('Description')),
+    "alertCodes": (r.get('RatedShipmentAlert') == null ? [] : (r.RatedShipmentAlert instanceof Array ? r.RatedShipmentAlert : [r.RatedShipmentAlert])).map(a => a.get('Code'))
   }),
 
   "keepOption": (o, allowed) => (o.amount != null && !isNaN(o.amount) && o.serviceCode != '' && (allowed == null || allowed.length == 0 || allowed.indexOf(o.serviceCode) >= 0)),

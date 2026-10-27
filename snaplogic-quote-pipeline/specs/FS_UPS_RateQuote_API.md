@@ -142,8 +142,6 @@ Keep the totals inside the app's request timeout: two Freshservice calls plus on
 
 ### 6.2 Snaps in execution order
 
-Snap numbers 09 to 11 are not used. They held the department and Class lookup, which moved to the label pipeline.
-
 #### [01] Mapper — `01 Parse request`
 
 Reads the POST body. Validates ticketId, keeps or creates a requestId, records today's date in the shipping time zone.
@@ -330,7 +328,7 @@ Turns RatedShipment into option cards: filter, sort by price, tag Lowest cost an
 |---|---|
 | `$original.ctx` | `$ctx` |
 | `'' + $entity.get('RateResponse', {}).get('Response', {}).get('ResponseStatus', {}).get('Code', '')` | `$upsStatusCode` |
-| `lib.fs_ups_fn.tag(lib.fs_ups_fn.toArray($entity.get('RateResponse', {}).get('RatedShipment')).map(r => lib.fs_ups_fn.option(r, lib.fs_ups_config)).filter(o => lib.fs_ups_fn.keepOption(o, lib.fs_ups_config.allowedServiceCodes)).sort((a, b) => a.amount - b.amount))` | `$options` |
+| `lib.fs_ups_fn.tag(lib.fs_ups_fn.toArray($entity.get('RateResponse', {}).get('RatedShipment')).map(r => lib.fs_ups_fn.option(r, lib.fs_ups_config, lib.fs_ups_fn.negotiated(r), lib.fs_ups_fn.published(r))).filter(o => lib.fs_ups_fn.keepOption(o, lib.fs_ups_config.allowedServiceCodes)).sort((a, b) => a.amount - b.amount))` | `$options` |
 | `lib.fs_ups_fn.toArray($entity.get('RateResponse', {}).get('Response', {}).get('Alert')).map(a => a.get('Description'))` | `$alerts` |
 
 #### [15] Router — `15 Options found?`
@@ -544,7 +542,10 @@ The body is a JSON array with one envelope. These examples were produced by the 
         "publishedAmount": 39.43,
         "negotiatedAmount": 35.1,
         "negotiated": true,
+        "amountSource": "shipment",
         "amount": 35.1,
+        "listAmount": 39.43,
+        "shipmentLevelNegotiated": 35.1,
         "arrivalDate": "2026-10-30",
         "arrivalTime": "23:00",
         "arrivalKey": "20261030230000",
@@ -553,6 +554,9 @@ The body is a JSON array with one envelope. These examples were produced by the 
         "guaranteed": false,
         "alerts": [
           "Your invoice may vary from the displayed reference rates"
+        ],
+        "alertCodes": [
+          "110971"
         ],
         "tags": [
           "Lowest cost"
@@ -569,7 +573,29 @@ The body is a JSON array with one envelope. These examples were produced by the 
 ]
 ```
 
-Option fields: `serviceCode`, `serviceName`, `currency`, `amount` (negotiated if UPS returned one, otherwise published), `publishedAmount`, `negotiatedAmount`, `negotiated`, `arrivalDate`, `arrivalTime` (`HH:MM`), `dayOfWeek`, `businessDays`, `guaranteed`, `alerts`, `tags` (`Lowest cost`, `Fastest`). `arrivalKey` is internal (sorting). The app decides how to word `arrivalTime`, for example "End of day" for Ground; **Verify** what UPS returns for Ground in the test environment.
+Option fields: `serviceCode`, `serviceName`, `currency`, `amount` (the price to show), `listAmount` (the struck-through price, or `null`), `publishedAmount`, `negotiatedAmount`, `negotiated`, `amountSource` (`package`, `shipment` or `published`), `shipmentLevelNegotiated` (diagnostics only), `arrivalDate`, `arrivalTime` (`HH:MM`), `dayOfWeek`, `businessDays`, `guaranteed`, `alerts`, `alertCodes`, `tags` (`Lowest cost`, `Fastest`). `arrivalKey` is internal (sorting).
+
+### How the amounts are calculated
+
+Checked against a real UPS `RatedShipment` (2nd Day Air) and the price UPS shows on its website for the same option, saved as `snaplogic/samples/ups-rated-shipment.real.json`:
+
+| UPS field | Value | Used for |
+|---|---|---|
+| `TotalCharges.MonetaryValue` | 173.19 | `publishedAmount` and `listAmount` (the struck-through price on the UPS page) |
+| `RatedPackage[].NegotiatedCharges.TotalCharge.MonetaryValue` | 46.34 | `negotiatedAmount` and `amount` (the price on the UPS page) |
+| `NegotiatedRateCharges.TotalCharge.MonetaryValue` (shipment level) | 171.46 | **Not used for the price.** It does not match the UPS page. Kept as `shipmentLevelNegotiated` so you can see the difference |
+
+Rules (function `negotiated` in `fs_ups_fn.expr`):
+
+1. If every package has a negotiated total, `negotiatedAmount` is their sum, rounded to cents. A single package returned as an object instead of an array also works.
+2. Otherwise it falls back to the shipment-level negotiated total, and `amountSource` is `shipment`. Treat that value with caution, because the real sample shows it can differ from what UPS displays.
+3. If there is no negotiated rate, `amount` is the published price and `listAmount` is `null`.
+4. `listAmount` is only set when the published price is higher than the price shown, so the app strikes it through only when there is a discount.
+5. The package-level total checks out: 33.49 base + 11.50 itemized + 1.35 demand surcharge = 46.34.
+
+The app shows `amount` as the price, and `listAmount` struck through when it is not `null`. Format `arrivalTime` as a 12-hour clock ("23:00" becomes "By 11:00 PM", as UPS shows). Show `alerts` to the agent. This sample carries code `110920`: "Ship To Address Classification is changed from Residential to Commercial", which explains the demand surcharge and may mean the address is not residential.
+
+`guaranteed` is true only when `GuaranteedDelivery.DeliveryByTime` exists. In the real sample `GuaranteedDelivery` is present without `DeliveryByTime`, and the UPS page shows no guarantee icon. This is an inference from one sample and your earlier screenshot, so **verify** it with a Next Day Air sample.
 
 **Invalid form**
 
@@ -698,8 +724,8 @@ Every response carries `requestId` (from the app) and `quoteId` (the SnapLogic e
 **Automated (Node.js 18+), from the repo root:**
 
 ```bash
-node snaplogic/tests/test_expressions.js        # 27 groups: every library function + syntax check
-node snaplogic/tests/simulate_quote_pipeline.js  # 14 end-to-end scenarios with mocked HTTP responses
+node snaplogic/tests/test_expressions.js        # 34 groups: every library function, amounts checked against a real UPS rated shipment
+node snaplogic/tests/simulate_quote_pipeline.js  # 15 end-to-end scenarios with mocked HTTP responses
 ```
 
 These prove the logic of the exact expressions in this guide. They do not prove SnapLogic accepts the syntax or that the real APIs return these shapes.
@@ -748,7 +774,7 @@ These prove the logic of the exact expressions in this guide. They do not prove 
 
 **Confirmed (vendor docs):** bearer token in the `Authorization` header; a cleared token means the pipeline authenticates; one unconnected output view returned as a JSON array; a POST object becomes one input document; the "do not start" option returns 409; minimum task timeout 1 minute; the Document to Binary `status` header option; HTTP Client is recommended over REST Snaps; `encodeURIComponent` for URL parts.
 
-**Tested (Node.js):** every library function, every Mapper and Router expression, and 14 end-to-end scenarios.
+**Tested (Node.js):** every library function, every Mapper and Router expression, 15 end-to-end scenarios, and the amounts against a real UPS rated shipment.
 
 **Verify before go-live:**
 
@@ -760,4 +786,30 @@ These prove the logic of the exact expressions in this guide. They do not prove 
 6. Freshservice `GET /api/v2/requesters?email=` returns `{ "requesters": [...] }`.
 7. UPS: request option casing (`Shoptimeintransit` in the URL and body; your sample used `shopTimeInTransit`), `DeliveryTimeInformation.Pickup.Date`, `ResidentialAddressIndicator`, and the response leaf names under `TimeInTransit` and `GuaranteedDelivery`.
 8. The service code names in `serviceNames`.
+8a. The shipment-level negotiated total: the real sample shows it (171.46) differs from the package-level total (46.34) that UPS displays. Check whether the UPS test environment or your production account behaves the same, and keep logging `shipmentLevelNegotiated` until you know.
+8b. A real Ground sample: the UPS page showed "End of Day" for Ground, and this guide only maps times from the data. Send a Ground `RatedShipment` to confirm what `Arrival.Time` holds.
 9. The app's request timeout against the measured T13 time.
+
+## 16. Troubleshooting
+
+### A library function always returns null
+
+Example: `lib.fs_ups_fn.clean($.get('ticketId'))` shows `null` although `$.get('ticketId')` shows 46.
+
+1. **The "As" column holds the library name only.** SnapLogic documents the "As" value as "the name to use for the library under the lib variable" and says it defaults to the base name of the file. Leave the column empty, or enter exactly `fs_ups_fn` and `fs_ups_config`. Do not enter `lib.fs_ups_fn.*`: that makes a library literally named `lib.fs_ups_fn.*`, so `lib.fs_ups_fn` does not exist.
+2. **Save the Pipeline Properties dialog**, then close and reopen the Mapper. The docs say imported libraries become available after you click Save.
+3. **Turn off Null-safe access** on a test Mapper. With it on, an expression that cannot be evaluated returns `null` instead of an error, which hides the real cause. With it off, the Mapper shows the actual message.
+4. Test in a scratch Mapper, one row each:
+
+| Expression | Expected |
+|---|---|
+| `typeof lib.fs_ups_config` | `object` |
+| `lib.fs_ups_config.sender.name` | `Pearce Roseville - IT` |
+| `typeof lib.fs_ups_fn` | `object` |
+| `lib.fs_ups_fn.clean(' 46 ')` | `46` |
+
+If config works but `fs_ups_fn` does not, the function library failed to load. Re-upload the latest file and check the Mapper error with Null-safe access off.
+
+### Parameter names
+
+A parameter named `fsBaseUrl` is referenced as `_fsBaseUrl` (SnapLogic adds the underscore). Do not put the underscore in the parameter key. A key such as `_fs_api_base_url` is referenced as `__fs_api_base_url`. Use the names in section 4 (`fsBaseUrl`, `upsBaseUrl`, `upsRatingVersion`, `upsRequestOption`, `upsTransactionSrc`), or change the expressions to match your names.

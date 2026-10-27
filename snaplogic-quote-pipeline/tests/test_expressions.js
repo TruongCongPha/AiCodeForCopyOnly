@@ -226,23 +226,78 @@ t("buildRateRequest: business, declared value, line 2, no company", () => {
 const sample = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "samples", "ups-rate-response.synthetic.json"), "utf8"));
 const rated = fn.toArray(sample.RateResponse.RatedShipment);
 t("option: negotiated, published, transit, names", () => {
-  const o = rated.map(r => fn.option(r, cfg));
+  const o = rated.map(r => fn.option(r, cfg, fn.negotiated(r), fn.published(r)));
   eq(o[0].serviceCode, "03"); eq(o[0].serviceName, "UPS Ground");
   eq(o[0].amount, 35.10); eq(o[0].negotiated, true); eq(o[0].publishedAmount, 39.43);
   eq(o[0].arrivalDate, "2026-10-30"); eq(o[0].arrivalTime, "23:00"); eq(o[0].businessDays, "4");
-  eq(o[0].guaranteed, false); eq(o[0].alerts, ["Your invoice may vary from the displayed reference rates"]);
+  eq(o[0].guaranteed, false); eq(o[0].amountSource, "shipment"); eq(o[0].listAmount, 39.43); eq(o[0].alerts, ["Your invoice may vary from the displayed reference rates"]);
   eq(o[1].serviceName, "UPS Next Day Air"); eq(o[1].amount, 250.75); eq(o[1].negotiated, false);
   eq(o[1].arrivalTime, "10:30"); eq(o[1].guaranteed, true); eq(o[1].businessDays, "1");
   eq(o[2].serviceName, "UPS Next Day Air Early"); eq(o[2].arrivalTime, "08:00");
   eq(o[3].serviceName, "UPS service 99"); eq(o[3].amount, null); eq(o[3].arrivalDate, null);
 });
+// --- amounts, checked against a real UPS RatedShipment and what the UPS page shows
+const real = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "samples", "ups-rated-shipment.real.json"), "utf8"));
+const realOpt = fn.option(real, cfg, fn.negotiated(real), fn.published(real));
+t("amounts match the UPS page for the real 2nd Day Air sample", () => {
+  eq(realOpt.amount, 46.34);               // price shown by UPS
+  eq(realOpt.listAmount, 173.19);          // struck-through price shown by UPS
+  eq(realOpt.publishedAmount, 173.19);
+  eq(realOpt.negotiatedAmount, 46.34);
+  eq(realOpt.negotiated, true);
+  eq(realOpt.amountSource, "package");
+  eq(realOpt.shipmentLevelNegotiated, 171.46); // kept for diagnostics only, never used for the price
+  eq(realOpt.currency, "USD");
+});
+t("real sample: service, arrival, alerts and guarantee", () => {
+  eq(realOpt.serviceCode, "02"); eq(realOpt.serviceName, "UPS 2nd Day Air");
+  eq(realOpt.arrivalDate, "2026-11-02"); eq(realOpt.arrivalTime, "23:00"); eq(realOpt.dayOfWeek, "MON");
+  eq(realOpt.businessDays, "2");
+  eq(realOpt.alertCodes, ["112237", "110971", "110920"]); eq(realOpt.alerts.length, 3);
+  eq(realOpt.guaranteed, false); // GuaranteedDelivery has no DeliveryByTime and the UPS page shows no medal
+});
+t("negotiated(): package sum, single package object, missing package, none", () => {
+  eq(fn.negotiated(real), {amount: 46.34, source: "package"});
+  const two = JSON.parse(JSON.stringify(real));
+  two.RatedPackage.push(JSON.parse(JSON.stringify(real.RatedPackage[0])));
+  two.RatedPackage[1].NegotiatedCharges.TotalCharge.MonetaryValue = "20.10";
+  eq(fn.negotiated(two), {amount: 66.44, source: "package"});
+  const single = JSON.parse(JSON.stringify(real)); single.RatedPackage = real.RatedPackage[0];
+  eq(fn.negotiated(single), {amount: 46.34, source: "package"});
+  const mixed = JSON.parse(JSON.stringify(two)); delete mixed.RatedPackage[1].NegotiatedCharges;
+  eq(fn.negotiated(mixed), {amount: 171.46, source: "shipment"});   // not every package negotiated: fall back
+  const noPkg = JSON.parse(JSON.stringify(real)); delete noPkg.RatedPackage;
+  eq(fn.negotiated(noPkg), {amount: 171.46, source: "shipment"});
+  const none = JSON.parse(JSON.stringify(noPkg)); delete none.NegotiatedRateCharges;
+  eq(fn.negotiated(none), {amount: null, source: null});
+  eq(fn.negotiated({}), {amount: null, source: null});
+});
+t("published(): value, missing, text", () => {
+  eq(fn.published(real), 173.19); eq(fn.published({}), null); eq(fn.published({TotalCharges: {MonetaryValue: "n/a"}}), null);
+});
+t("option: no negotiated rate means published price and no strike-through", () => {
+  const noNeg = {Service: {Code: "03"}, TotalCharges: {CurrencyCode: "USD", MonetaryValue: "39.43"}};
+  const o = fn.option(noNeg, cfg, fn.negotiated(noNeg), fn.published(noNeg));
+  eq([o.amount, o.listAmount, o.negotiated, o.amountSource], [39.43, null, false, "published"]);
+  const none = fn.option({Service: {Code: "99"}}, cfg, fn.negotiated({}), fn.published({}));
+  eq([none.amount, none.amountSource, fn.keepOption(none, [])], [null, null, false]);
+});
+t("option: negotiated equal to published has no strike-through", () => {
+  const same = {Service: {Code: "03"}, TotalCharges: {MonetaryValue: "20.00"}, RatedPackage: {NegotiatedCharges: {TotalCharge: {MonetaryValue: "20.00"}}}};
+  eq(fn.option(same, cfg, fn.negotiated(same), fn.published(same)).listAmount, null);
+});
+t("negotiated(): rounding avoids float artifacts", () => {
+  const f = {RatedPackage: [{NegotiatedCharges: {TotalCharge: {MonetaryValue: "0.10"}}}, {NegotiatedCharges: {TotalCharge: {MonetaryValue: "0.20"}}}]};
+  eq(fn.negotiated(f).amount, 0.3);
+});
+
 t("keepOption, sort, tag", () => {
-  const opts = rated.map(r => fn.option(r, cfg)).filter(o => fn.keepOption(o, cfg.allowedServiceCodes)).sort((a, b) => a.amount - b.amount);
+  const opts = rated.map(r => fn.option(r, cfg, fn.negotiated(r), fn.published(r))).filter(o => fn.keepOption(o, cfg.allowedServiceCodes)).sort((a, b) => a.amount - b.amount);
   eq(opts.map(o => o.serviceCode), ["03", "01", "14"]);
   const tagged = fn.tag(opts);
   eq(tagged.map(o => o.tags), [["Lowest cost"], [], ["Fastest"]]);
   eq(fn.tag([]), []);
-  const only = rated.map(r => fn.option(r, cfg)).filter(o => fn.keepOption(o, ["01", "14"]));
+  const only = rated.map(r => fn.option(r, cfg, fn.negotiated(r), fn.published(r))).filter(o => fn.keepOption(o, ["01", "14"]));
   eq(only.map(o => o.serviceCode), ["01", "14"]);
 });
 t("toArray handles a single RatedShipment object", () => {

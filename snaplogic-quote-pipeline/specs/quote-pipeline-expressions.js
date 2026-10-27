@@ -113,7 +113,7 @@ module.exports = {
       rows: [
         [`$original.ctx`, "$ctx"],
         [`'' + $entity.get('RateResponse', {}).get('Response', {}).get('ResponseStatus', {}).get('Code', '')`, "$upsStatusCode"],
-        [`lib.fs_ups_fn.tag(lib.fs_ups_fn.toArray($entity.get('RateResponse', {}).get('RatedShipment')).map(r => lib.fs_ups_fn.option(r, lib.fs_ups_config)).filter(o => lib.fs_ups_fn.keepOption(o, lib.fs_ups_config.allowedServiceCodes)).sort((a, b) => a.amount - b.amount))`, "$options"],
+        [`lib.fs_ups_fn.tag(lib.fs_ups_fn.toArray($entity.get('RateResponse', {}).get('RatedShipment')).map(r => lib.fs_ups_fn.option(r, lib.fs_ups_config, lib.fs_ups_fn.negotiated(r), lib.fs_ups_fn.published(r))).filter(o => lib.fs_ups_fn.keepOption(o, lib.fs_ups_config.allowedServiceCodes)).sort((a, b) => a.amount - b.amount))`, "$options"],
         [`lib.fs_ups_fn.toArray($entity.get('RateResponse', {}).get('Response', {}).get('Alert')).map(a => a.get('Description'))`, "$alerts"]
       ]
     },

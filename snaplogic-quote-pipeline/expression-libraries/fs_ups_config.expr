@@ -6,24 +6,23 @@
     "addressLines": ["9000 Foothills Blvd"],
     "city": "ROSEVILLE",
     "state": "CA",
-    "postalCode": "95747",
+    "postalCode": "95678",
     "countryCode": "US"
   },
-  "shipperNumber": "REPLACE_WITH_SHIPPER_NUMBER",
+  "shipperNumber": "120Y37",
   "fs": {
     "serviceItemId": null
   },
   "fsFields": {
     "receiver": "receiver",
-    "phone": "receiver_phone",
-    "line1": "address_line_1",
-    "line2": "address_line_2",
+    "phone": "phone",
+    "line1": "address",
     "city": "city",
     "state": "state",
     "zip": "zip_code",
-    "deliveryType": "delivery_type",
     "weight": "package_weight_lbs",
-    "shipDate": "ship_date"
+    "shipDate": "estimated_pickup_or_drop_off_date",
+    "residential": "this_is_a_residential_address"
   },
   "classRule": {
     "source": "name",
@@ -38,7 +37,7 @@
   },
   "defaults": {
     "receiverCompany": "PEARCE SERVICES",
-    "residential": true,
+    "residential": false,
     "packagingCode": "02",
     "packageBillType": "03",
     "declaredValue": null,
