@@ -1,0 +1,40 @@
+[
+  {
+    "error": "Failed to execute the request, or the endpoint responded an error",
+    "stacktrace": "com.snaplogic.snap.api.http.exceptions.HttpCoreConnectionException: Got response 404 - Not Found from the endpoint\n\tat com.snaplogic.snap.api.http.HttpSnapService.request(HttpSnapService.java:333)\n\t... (trimmed)",
+    "reason": "Got response 404 - Not Found from the endpoint",
+    "resolution": "Refer to the error document in the error view for more information",
+    "status_code": "error",
+    "statusLine": { "httpVersion": "HTTP/1.1", "statusCode": 404, "statusText": "Not Found" },
+    "headers": {
+      "Date": "Tue, 27 Oct 2026 17:44:42 GMT",
+      "Content-Type": "text/html",
+      "Transfer-Encoding": "chunked",
+      "Connection": "keep-alive",
+      "status": "404 Not Found",
+      "x-request-id": "bbacf541-0476-9824-b698-56dd484f4acf",
+      "x-fw-ratelimiting-managed": "true",
+      "x-ratelimit-total": "160",
+      "x-ratelimit-remaining": "158",
+      "x-ratelimit-used-currentrequest": "1",
+      "Server": "cloudflare"
+    },
+    "entity": "",
+    "snap_details": {
+      "label": "03 FS requested items",
+      "class_id": "com-snaplogic-snaps-apisuite-httpclient",
+      "build_tag": "445patches36277",
+      "views": { "in": { "input0": { "count": 1 } }, "out": { "outputResponse": { "count": 0 } }, "error": { "error0": { "count": 0 } } }
+    },
+    "original": {
+      "ctx": {
+        "ticketIdRaw": "999",
+        "ticketId": 999,
+        "requestId": "test-0001",
+        "executionId": "5abd930a2bd3ec0021159380_a01da94a-dc36-4365-ad4e-a950ff23daed",
+        "today": "20261027",
+        "stage": "items"
+      }
+    }
+  }
+]

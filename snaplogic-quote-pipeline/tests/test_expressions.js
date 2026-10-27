@@ -305,21 +305,43 @@ t("toArray handles a single RatedShipment object", () => {
 });
 
 // --- errors
-t("httpStatus", () => {
-  eq(fn.httpStatus({status_code: 404}), 404);
-  eq(fn.httpStatus({error: "Failed", reason: "status code = 429"}), 429);
-  eq(fn.httpStatus({error: "HTTP status code: 503"}), 503);
-  eq(fn.httpStatus({error: "Connection refused"}), null);
+const realErr = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "samples", "fs-error-404.real.json"), "utf8"))[0];
+t("httpStatus reads statusLine.statusCode from the real error document", () => {
+  eq(realErr.status_code, "error");        // the real field is text, not the HTTP code
+  eq(fn.httpStatus(realErr), 404);
+});
+t("httpStatus fallbacks", () => {
+  eq(fn.httpStatus({statusLine: {statusCode: 429}}), 429);
+  eq(fn.httpStatus({statusLine: {statusCode: "503"}}), 503);
+  eq(fn.httpStatus({status_code: "error", reason: "Got response 502 - Bad Gateway from the endpoint"}), 502);
+  eq(fn.httpStatus({headers: {status: "403 Forbidden"}}), 403);
+  eq(fn.httpStatus({status_code: "error", reason: "Connection refused"}), null);
+  eq(fn.httpStatus({error: "Connection timed out"}), null);
+  eq(fn.httpStatus({statusLine: {statusCode: "x"}, reason: "Got response 500 - Server Error from the endpoint"}), 500);
 });
 t("fsError mapping", () => {
-  eq(fn.fsError(404, "items", null).code, "TICKET_NOT_FOUND");
-  eq(fn.fsError(404, "receiver", null).code, "RECEIVER_NOT_FOUND");
-  eq(fn.fsError(404, "department", null).code, "DEPARTMENT_NOT_FOUND");
-  eq(fn.fsError(403, "items", {message: "denied"}).code, "FS_AUTH");
-  eq(fn.fsError(403, "items", {message: "denied"}).detail, "denied");
-  eq(fn.fsError(429, "receiver", null).retryable, true);
-  eq(fn.fsError(null, "items", "timeout").code, "FS_UNAVAILABLE");
-  eq(fn.fsError(500, "items", null).source, "FRESHSERVICE");
+  eq(fn.fsError(404, "items", "", {}).code, "TICKET_NOT_FOUND");
+  eq(fn.fsError(404, "receiver", "", {}).code, "RECEIVER_NOT_FOUND");
+  eq(fn.fsError(404, "department", "", {}).code, "DEPARTMENT_NOT_FOUND");
+  eq(fn.fsError(403, "items", {message: "denied"}, {}).code, "FS_AUTH");
+  eq(fn.fsError(403, "items", {message: "denied"}, {}).detail, "denied");
+  eq(fn.fsError(429, "receiver", null, null).retryable, true);
+  eq(fn.fsError(null, "items", "timeout", null).code, "FS_UNAVAILABLE");
+  eq(fn.fsError(500, "items", null, null).source, "FRESHSERVICE");
+});
+t("fsError with the real 404 document", () => {
+  const e = fn.fsError(fn.httpStatus(realErr), realErr.original.ctx.stage, realErr.entity, realErr.headers);
+  eq([e.status, e.httpStatus, e.code, e.retryable], ["invalid", 404, "TICKET_NOT_FOUND", false]);
+  eq([e.source, e.stage, e.upstreamStatus], ["FRESHSERVICE", "items", 404]);
+  eq(e.detail, null);                       // empty text/html body gives no detail
+  eq(e.rateLimitRemaining, 158); eq(e.retryAfter, null);
+});
+t("fsError: Retry-After header in either case, text bodies truncated", () => {
+  eq(fn.fsError(429, "items", null, {"Retry-After": "30"}).retryAfter, 30);
+  eq(fn.fsError(429, "items", null, {"retry-after": "12"}).retryAfter, 12);
+  eq(fn.fsError(429, "items", null, {"retry-after": "soon"}).retryAfter, null);
+  eq(fn.fsError(500, "items", "x".repeat(900), {}).detail.length, 500);
+  eq(fn.fsError(500, "items", "   ", {}).detail, null);
 });
 t("upsError mapping", () => {
   const ent = {response: {errors: [{code: "111210", message: "The requested service is unavailable between the selected locations."}]}};
@@ -330,6 +352,7 @@ t("upsError mapping", () => {
   eq(fn.upsError(503, null).retryable, true);
   eq(fn.upsError(null, "socket timeout").code, "UPS_UNAVAILABLE");
   eq(fn.upsError(400, "not json").message, "UPS rejected the shipment details.");
+  eq(fn.upsError(400, "").message, "UPS rejected the shipment details."); eq(fn.upsError(400, "").details, []);
 });
 
 console.log("\n" + passed + " test groups passed" + (process.exitCode ? ", some FAILED" : ""));

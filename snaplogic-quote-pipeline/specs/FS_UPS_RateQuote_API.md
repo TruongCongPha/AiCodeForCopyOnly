@@ -138,7 +138,24 @@ Create the pipeline `FS_UPS_RateQuote_API`, then in **Pipeline Properties**: add
 
 Keep the totals inside the app's request timeout: two Freshservice calls plus one UPS call normally take a few seconds, but retries add up. Measure it in the sandbox (see section 13).
 
-**Carrying context through HTTP calls.** The design keeps everything in one object, `$ctx`. Each HTTP Client receives `$ctx` and the next Mapper restores it from `$original.ctx`. **Verify `$original`** in Designer preview on 03's output and error view. If your HTTP Client does not include `original`, put a **Copy** before the HTTP Client and a **Join** (Merge) after it, then read `$ctx` instead of `$original.ctx`.
+**Carrying context through HTTP calls.** The design keeps everything in one object, `$ctx`. Each HTTP Client receives `$ctx` and the next Mapper restores it from `$original.ctx`. **Confirmed for the error view** by a real Freshservice 404 (`snaplogic/samples/fs-error-404.real.json`): the error document carries the input document as `original`, so `$original.ctx` works there. **Verify the success output** the same way in Designer preview on 03. If it has no `original`, put a **Copy** before the HTTP Client and a **Join** (Merge) after it, then read `$ctx` instead of `$original.ctx`.
+
+### 6.1a The HTTP Client error document (real shape)
+
+From a real Freshservice 404 on a ticket that does not exist:
+
+| Field | Real value | How the pipeline uses it |
+|---|---|---|
+| `statusLine.statusCode` | `404` (number) | **The HTTP code.** Read by `httpStatus` |
+| `status_code` | `"error"` (text) | **Not the HTTP code.** Never read it as a number |
+| `reason` | `Got response 404 - Not Found from the endpoint` | Fallback when `statusLine` is missing |
+| `headers` | `status`, `x-ratelimit-total`, `x-ratelimit-remaining`, `Content-Type`, … | Rate-limit values and `Retry-After`. Header names are mostly lower case, so read both cases |
+| `entity` | `""` (empty text, because the 404 body was `text/html`) | The response body. There is **no** `error_entity` field |
+| `original` | `{ "ctx": { ... } }` | The context sent into the Snap |
+
+A 404 on `requested_items` has an empty body, so the message comes from the pipeline and not from Freshservice. Freshservice may also return 404 when the ticket exists but is not a service request, or when the integration user cannot see it. The message says so. **Verify** with a real incident ticket and with a ticket the integration agent cannot access.
+
+The real sample is the only error shape confirmed so far. A call that never reaches Freshservice (timeout, connection refused) has no `statusLine`. `httpStatus` then returns `null` and the response is `FS_UNAVAILABLE` (retryable). **Verify** the document for that case and for a UPS 400 once you have them.
 
 ### 6.2 Snaps in execution order
 
@@ -396,14 +413,14 @@ Input: U1.
 
 | Expression | Target path |
 |---|---|
-| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).status` | `$status` |
-| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).httpStatus` | `$httpStatus` |
-| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).code` | `$code` |
-| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).message` | `$message` |
-| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).retryable` | `$retryable` |
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).status` | `$status` |
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).httpStatus` | `$httpStatus` |
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).code` | `$code` |
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).message` | `$message` |
+| `lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).retryable` | `$retryable` |
 | `$original.ctx.requestId` | `$requestId` |
 | `$original.ctx.ticketId` | `$ticketId` |
-| `{"source": "FRESHSERVICE", "stage": $original.ctx.stage, "upstreamStatus": lib.fs_ups_fn.httpStatus($), "detail": lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).detail}` | `$error` |
+| `{"source": "FRESHSERVICE", "stage": $original.ctx.stage, "upstreamStatus": lib.fs_ups_fn.httpStatus($), "detail": lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).detail, "retryAfter": lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).retryAfter, "rateLimitRemaining": lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).rateLimitRemaining}` | `$error` |
 
 #### [U2] Union — `U2 Invalid shipment`
 
@@ -440,14 +457,14 @@ Input: 13 error view.
 
 | Expression | Target path |
 |---|---|
-| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).status` | `$status` |
-| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).httpStatus` | `$httpStatus` |
-| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).code` | `$code` |
-| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).message` | `$message` |
-| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).retryable` | `$retryable` |
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).status` | `$status` |
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).httpStatus` | `$httpStatus` |
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).code` | `$code` |
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).message` | `$message` |
+| `lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).retryable` | `$retryable` |
 | `$original.ctx.requestId` | `$requestId` |
 | `$original.ctx.ticketId` | `$ticketId` |
-| `{"source": "UPS", "upstreamStatus": lib.fs_ups_fn.httpStatus($), "details": lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).details}` | `$error` |
+| `{"source": "UPS", "upstreamStatus": lib.fs_ups_fn.httpStatus($), "details": lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).details}` | `$error` |
 
 #### [E5] Mapper — `E5 No options`
 
@@ -627,7 +644,7 @@ The app shows `amount` as the price, and `listAmount` struck through when it is 
 |---|---|---|---|---|
 | `ok` | 200 | — | Options found | Cards |
 | `invalid` | 400 | `INVALID_REQUEST` | Bad or missing ticketId | Generic error (app bug) |
-| `invalid` | 404 | `TICKET_NOT_FOUND` | Ticket doesn't exist | Message |
+| `invalid` | 404 | `TICKET_NOT_FOUND` | Freshservice has no requested items for this ticket (it may not exist, may not be a service request, or the integration user can't see it) | Message |
 | `invalid` | 422 | `NOT_A_UPS_TICKET` | No UPS Shipment Details item | Message |
 | `invalid` | 422 | `INVALID_SHIPMENT` | Form or receiver problems, listed in `problems[]` | List of fixes |
 | `invalid` | 422 | `RECEIVER_NOT_FOUND` | Receiver lookup failed | Message |
@@ -724,8 +741,8 @@ Every response carries `requestId` (from the app) and `quoteId` (the SnapLogic e
 **Automated (Node.js 18+), from the repo root:**
 
 ```bash
-node snaplogic/tests/test_expressions.js        # 34 groups: every library function, amounts checked against a real UPS rated shipment
-node snaplogic/tests/simulate_quote_pipeline.js  # 15 end-to-end scenarios with mocked HTTP responses
+node snaplogic/tests/test_expressions.js        # 37 groups: every library function, amounts checked against a real UPS rated shipment
+node snaplogic/tests/simulate_quote_pipeline.js  # 19 end-to-end scenarios with mocked HTTP responses
 ```
 
 These prove the logic of the exact expressions in this guide. They do not prove SnapLogic accepts the syntax or that the real APIs return these shapes.
@@ -774,11 +791,11 @@ These prove the logic of the exact expressions in this guide. They do not prove 
 
 **Confirmed (vendor docs):** bearer token in the `Authorization` header; a cleared token means the pipeline authenticates; one unconnected output view returned as a JSON array; a POST object becomes one input document; the "do not start" option returns 409; minimum task timeout 1 minute; the Document to Binary `status` header option; HTTP Client is recommended over REST Snaps; `encodeURIComponent` for URL parts.
 
-**Tested (Node.js):** every library function, every Mapper and Router expression, 15 end-to-end scenarios, and the amounts against a real UPS rated shipment.
+**Tested (Node.js):** every library function, every Mapper and Router expression, 19 end-to-end scenarios, the amounts against a real UPS rated shipment, and the error handling against a real Freshservice 404.
 
 **Verify before go-live:**
 
-1. `$original` on HTTP Client output and error documents, and the error document fields (`error`, `reason`, `error_entity`). If `error_entity` is a string, the UPS and Freshservice messages fall back to generic text.
+1. `$original` on the HTTP Client **success** output (the error view is confirmed). Also a real error document for a UPS 400 (is `entity` parsed JSON or text?), for a Freshservice 401, and for a call with no HTTP response (timeout). If a UPS `entity` is text, the message falls back to "UPS rejected the shipment details."
 2. `Date.now().toLocaleDateString({"format": "yyyyMMdd", "timeZone": ...})` returns `yyyyMMdd`.
 3. Pass-through Mappers writing nested targets such as `$ctx.problems`.
 4. Expression library syntax: arrow functions and `.extend` in 4.44.1. Default `.sort()` on strings sorts ascending.

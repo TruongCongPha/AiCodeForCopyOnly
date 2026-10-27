@@ -45,12 +45,12 @@
     [('' + s.get('weight', '')).match(/^[0-9]+(\.[0-9]+)?$/) == null || parseFloat(s.get('weight', '0')) <= 0 || parseFloat(s.get('weight', '0')) > cfg.defaults.maxWeightLbs, "weight", "Enter a weight greater than 0 and up to " + cfg.defaults.maxWeightLbs + " lbs."],
     [s.get('shipDate') == null, "shipDate", "Enter a valid ship date."],
     [s.get('shipDate') != null && parseInt(s.shipDate, 10) < parseInt(today, 10), "shipDate", "The ship date is in the past."]
-  ].filter(p => p[0] == true).map(p => ({"field": p[1], "message": p[2]}))),
+  ].filter(p => p[0]).map(p => ({"field": p[1], "message": p[2]}))),
 
   "receiverProblems": rcv => [
     [rcv == null || rcv.get('found') != true, "receiver", "The receiver wasn't found in Freshservice. Pick the receiver again."],
     [rcv != null && rcv.get('found') == true && ('' + rcv.get('name', '')) == '', "receiver", "The receiver has no name in Freshservice."]
-  ].filter(p => p[0] == true).map(p => ({"field": p[1], "message": p[2]})),
+  ].filter(p => p[0]).map(p => ({"field": p[1], "message": p[2]})),
 
   "profileProblems": (rcv, classValue, cfg) => [
     [rcv == null || rcv.get('found') != true, "receiver", "The receiver wasn't found in Freshservice. Pick the receiver again."],
@@ -59,7 +59,7 @@
     [rcv != null && rcv.get('found') == true && rcv.get('departmentReason') == 'MULTIPLE_DEPARTMENTS', "department", "The receiver has more than one department. Ask an admin which one to use."],
     [classValue != null && ('' + classValue) == '', "class", "The receiver's department has no Class."],
     [classValue != null && ('' + classValue) != '' && (cfg.classRule.prefix + classValue).length > cfg.limits.referenceMax, "class", "The Class is too long for the label reference."]
-  ].filter(p => p[0] == true).map(p => ({"field": p[1], "message": p[2]})),
+  ].filter(p => p[0]).map(p => ({"field": p[1], "message": p[2]})),
 
   "buildRateRequest": (s, cfg, ctx) => ({
     "RateRequest": {
@@ -79,7 +79,7 @@
         },
         "ShipTo": {
           "Name": (cfg.defaults.receiverCompany != null && cfg.defaults.receiverCompany != '') ? cfg.defaults.receiverCompany : s.receiverName,
-          "Address": ({"AddressLine": [s.line1].filter(l => l != null && l != ''), "City": s.city, "StateProvinceCode": s.state, "PostalCode": s.zip, "CountryCode": cfg.sender.countryCode}).extend(s.residential == true ? {"ResidentialAddressIndicator": "Y"} : {})
+          "Address": ({"AddressLine": [s.line1, s.line2].filter(l => l != null && l != ''), "City": s.city, "StateProvinceCode": s.state, "PostalCode": s.zip, "CountryCode": cfg.sender.countryCode}).extend(s.residential == true ? {"ResidentialAddressIndicator": ""} : {})
         },
         "PaymentDetails": {
           "ShipmentCharge": {"Type": "01", "BillShipper": {"AccountNumber": cfg.shipperNumber}}
@@ -124,9 +124,9 @@
 
   "tag": options => options.map(o => o.extend({"tags": (o.amount == options[0].amount ? ["Lowest cost"] : []).concat(o.arrivalKey == options.map(x => x.arrivalKey).sort()[0] ? ["Fastest"] : [])})),
 
-  "httpStatus": e => (e.get('status_code') != null ? parseInt('' + e.status_code, 10) : (('' + e.get('error', '') + ' ' + e.get('reason', '')).match(/status code\s*[=:]?\s*(\d{3})/i) != null ? parseInt((('' + e.get('error', '') + ' ' + e.get('reason', '')).match(/status code\s*[=:]?\s*(\d{3})/i))[1], 10) : null)),
+  "httpStatus": e => ((e.get('statusLine', {}).get('statusCode') != null && !isNaN(parseInt('' + e.statusLine.statusCode, 10))) ? parseInt('' + e.statusLine.statusCode, 10) : ((('' + e.get('reason', '')).indexOf('response ') >= 0 && !isNaN(parseInt(('' + e.reason).substring(('' + e.reason).indexOf('response ') + 9, ('' + e.reason).indexOf('response ') + 12), 10))) ? parseInt(('' + e.reason).substring(('' + e.reason).indexOf('response ') + 9, ('' + e.reason).indexOf('response ') + 12), 10) : ((e.get('headers', {}).get('status') != null && !isNaN(parseInt(('' + e.headers.status).substring(0, 3), 10))) ? parseInt(('' + e.headers.status).substring(0, 3), 10) : null))),
 
-  "fsError": (status, stage, ent) => (status == 404 ? (stage == 'items' ? {"status": "invalid", "httpStatus": 404, "code": "TICKET_NOT_FOUND", "message": "This ticket wasn't found in Freshservice.", "retryable": false} : (stage == 'receiver' ? {"status": "invalid", "httpStatus": 422, "code": "RECEIVER_NOT_FOUND", "message": "The receiver wasn't found in Freshservice. Pick the receiver again.", "retryable": false} : {"status": "invalid", "httpStatus": 422, "code": "DEPARTMENT_NOT_FOUND", "message": "The receiver's department wasn't found in Freshservice.", "retryable": false})) : ((status == 401 || status == 403) ? {"status": "error", "httpStatus": 502, "code": "FS_AUTH", "message": "SnapLogic can't read Freshservice. Contact the integration team.", "retryable": false} : (status == 429 ? {"status": "error", "httpStatus": 503, "code": "FS_RATE_LIMITED", "message": "Freshservice is busy. Try again in a minute.", "retryable": true} : {"status": "error", "httpStatus": 502, "code": "FS_UNAVAILABLE", "message": "Freshservice didn't respond. Try again.", "retryable": true}))).extend({"source": "FRESHSERVICE", "stage": stage, "upstreamStatus": status, "detail": (ent instanceof Object ? ent.get('message', ent.get('description', null)) : (ent == null ? null : ('' + ent).substring(0, 500)))}),
+  "fsError": (status, stage, ent, hdrs) => (status == 404 ? (stage == 'items' ? {"status": "invalid", "httpStatus": 404, "code": "TICKET_NOT_FOUND", "message": "Freshservice has no requested items for this ticket. Check the ticket number, that it is a service request, and that the integration user can see it.", "retryable": false} : (stage == 'receiver' ? {"status": "invalid", "httpStatus": 422, "code": "RECEIVER_NOT_FOUND", "message": "The receiver wasn't found in Freshservice. Pick the receiver again.", "retryable": false} : {"status": "invalid", "httpStatus": 422, "code": "DEPARTMENT_NOT_FOUND", "message": "The receiver's department wasn't found in Freshservice.", "retryable": false})) : ((status == 401 || status == 403) ? {"status": "error", "httpStatus": 502, "code": "FS_AUTH", "message": "SnapLogic can't read Freshservice. Contact the integration team.", "retryable": false} : (status == 429 ? {"status": "error", "httpStatus": 503, "code": "FS_RATE_LIMITED", "message": "Freshservice is busy. Try again in a minute.", "retryable": true} : {"status": "error", "httpStatus": 502, "code": "FS_UNAVAILABLE", "message": "Freshservice didn't respond. Try again.", "retryable": true}))).extend({"source": "FRESHSERVICE", "stage": stage, "upstreamStatus": status, "detail": (ent instanceof Object ? ent.get('message', ent.get('description', null)) : ((ent == null || ('' + ent).trim() == '') ? null : ('' + ent).substring(0, 500))), "retryAfter": (hdrs == null || isNaN(parseInt('' + hdrs.get('retry-after', hdrs.get('Retry-After', '')), 10))) ? null : parseInt('' + hdrs.get('retry-after', hdrs.get('Retry-After', '')), 10), "rateLimitRemaining": (hdrs == null || isNaN(parseInt('' + hdrs.get('x-ratelimit-remaining', ''), 10))) ? null : parseInt('' + hdrs.get('x-ratelimit-remaining', ''), 10)}),
 
   "upsError": (status, ent) => (status == 400 ? {"status": "invalid", "httpStatus": 422, "code": "UPS_VALIDATION", "message": ((ent instanceof Object && ent.get('response') instanceof Object && ent.response.get('errors') instanceof Array && ent.response.errors.length > 0) ? ent.response.errors.map(x => x.get('message')).join(' | ') : "UPS rejected the shipment details."), "retryable": false} : ((status == 401 || status == 403) ? {"status": "error", "httpStatus": 502, "code": "UPS_AUTH", "message": "SnapLogic can't sign in to UPS. Contact the integration team.", "retryable": false} : {"status": "error", "httpStatus": 503, "code": "UPS_UNAVAILABLE", "message": "UPS didn't respond. Try again.", "retryable": true})).extend({"source": "UPS", "upstreamStatus": status, "details": ((ent instanceof Object && ent.get('response') instanceof Object && ent.response.get('errors') instanceof Array) ? ent.response.errors : [])})
 }

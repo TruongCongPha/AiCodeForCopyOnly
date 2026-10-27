@@ -155,13 +155,13 @@ module.exports = {
     {
       id: "E2", label: "E2 Freshservice error", type: "Mapper", passThrough: false, from: "U1",
       rows: [
-        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).status`, "$status"],
-        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).httpStatus`, "$httpStatus"],
-        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).code`, "$code"],
-        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).message`, "$message"],
-        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).retryable`, "$retryable"],
+        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).status`, "$status"],
+        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).httpStatus`, "$httpStatus"],
+        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).code`, "$code"],
+        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).message`, "$message"],
+        [`lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).retryable`, "$retryable"],
         [`$original.ctx.requestId`, "$requestId"], [`$original.ctx.ticketId`, "$ticketId"],
-        [`{"source": "FRESHSERVICE", "stage": $original.ctx.stage, "upstreamStatus": lib.fs_ups_fn.httpStatus($), "detail": lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('error_entity')).detail}`, "$error"]
+        [`{"source": "FRESHSERVICE", "stage": $original.ctx.stage, "upstreamStatus": lib.fs_ups_fn.httpStatus($), "detail": lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).detail, "retryAfter": lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).retryAfter, "rateLimitRemaining": lib.fs_ups_fn.fsError(lib.fs_ups_fn.httpStatus($), $original.ctx.stage, $.get('entity'), $.get('headers')).rateLimitRemaining}`, "$error"]
       ]
     },
     {
@@ -180,13 +180,13 @@ module.exports = {
     {
       id: "E4", label: "E4 UPS error", type: "Mapper", passThrough: false, from: "13 error view",
       rows: [
-        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).status`, "$status"],
-        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).httpStatus`, "$httpStatus"],
-        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).code`, "$code"],
-        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).message`, "$message"],
-        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).retryable`, "$retryable"],
+        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).status`, "$status"],
+        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).httpStatus`, "$httpStatus"],
+        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).code`, "$code"],
+        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).message`, "$message"],
+        [`lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).retryable`, "$retryable"],
         [`$original.ctx.requestId`, "$requestId"], [`$original.ctx.ticketId`, "$ticketId"],
-        [`{"source": "UPS", "upstreamStatus": lib.fs_ups_fn.httpStatus($), "details": lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('error_entity')).details}`, "$error"]
+        [`{"source": "UPS", "upstreamStatus": lib.fs_ups_fn.httpStatus($), "details": lib.fs_ups_fn.upsError(lib.fs_ups_fn.httpStatus($), $.get('entity')).details}`, "$error"]
       ]
     },
     {

@@ -3,8 +3,9 @@
 // Run: node snaplogic/tests/simulate_quote_pipeline.js
 //
 // Assumptions this simulation cannot prove (check them in Designer):
-//  - HTTP Client output and error documents carry the input document as $original.
-//  - HTTP Client error documents have error, reason and error_entity fields.
+//  - HTTP Client output documents carry the input document as $original (confirmed for the error view only).
+//  - HTTP Client error documents have the shape of samples/fs-error-404.real.json
+//    (statusLine.statusCode, entity, headers, original). Confirmed from a real Freshservice 404.
 //  - Mapper rows read the input document; pass-through copies it to the output.
 "use strict";
 const fs = require("fs");
@@ -91,7 +92,21 @@ function http(id, input, env, mocks, calls) {
   if (m.status >= 200 && m.status < 300) {
     return { ok: { statusLine: { statusCode: m.status }, headers: {}, entity: clone(m.body), original: clone(input) } };
   }
-  return { err: { error: "Failed to execute HTTP request", reason: "Request failed with status code = " + m.status, error_entity: m.body == null ? null : clone(m.body), original: clone(input) } };
+  const texts = { 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 429: "Too Many Requests", 500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable" };
+  if (m.status === 0) {
+    // No HTTP response at all (connection refused, timeout). No real sample yet, so the shape is a guess.
+    return { err: { error: "Failed to execute the request, or the endpoint responded an error", reason: "Connect to host failed", status_code: "error", entity: "", original: clone(input) } };
+  }
+  return { err: {
+    error: "Failed to execute the request, or the endpoint responded an error",
+    reason: "Got response " + m.status + " - " + (texts[m.status] || "Error") + " from the endpoint",
+    resolution: "Refer to the error document in the error view for more information",
+    status_code: "error",
+    statusLine: { httpVersion: "HTTP/1.1", statusCode: m.status, statusText: texts[m.status] || "Error" },
+    headers: Object.assign({ "Content-Type": "text/html", "x-ratelimit-total": "160", "x-ratelimit-remaining": "158" }, m.headers || {}),
+    entity: m.body == null ? "" : clone(m.body),
+    original: clone(input)
+  } };
 }
 
 function runQuote(body, mocks, cfgPatch) {
@@ -176,8 +191,9 @@ scenario("S2 bad ticketId returns 400 without any call", () => {
   eq(r.requestId, "exec-0001"); eq(res.calls.length, 0);
 });
 scenario("S3 ticket not found", () => {
-  const r = one(runQuote({ ticketId: 46 }, baseMocks({ ["GET " + FS + "/api/v2/tickets/46/requested_items"]: { status: 404, body: { message: "Not found" } } })));
+  const r = one(runQuote({ ticketId: 46 }, baseMocks({ ["GET " + FS + "/api/v2/tickets/46/requested_items"]: { status: 404, body: "" } })));
   eq([r.status, r.code, r.error.stage, r.error.upstreamStatus], ["invalid", "TICKET_NOT_FOUND", "items", 404]);
+  eq([r.error.rateLimitRemaining, r.error.retryAfter], [158, null]);
 });
 scenario("S4 not a UPS ticket (other service item)", () => {
   const r = one(runQuote({ ticketId: 46 }, baseMocks({ ["GET " + FS + "/api/v2/tickets/46/requested_items"]: items(goodFields, 99) }), c => { c.fs.serviceItemId = 42; }));
@@ -228,6 +244,24 @@ scenario("S14 receiver not found by ID (404)", () => {
   const r = one(runQuote({ ticketId: 46 }, baseMocks({ ["GET " + FS + "/api/v2/requesters/12345"]: { status: 404, body: { message: "Not found" } } })));
   eq([r.status, r.code], ["invalid", "RECEIVER_NOT_FOUND"]);
 });
+scenario("S16 Freshservice 429 passes Retry-After on", () => {
+  const r = one(runQuote({ ticketId: 46 }, baseMocks({ ["GET " + FS + "/api/v2/requesters/12345"]: { status: 429, body: null, headers: { "retry-after": "30" } } })));
+  eq([r.code, r.retryable, r.error.retryAfter], ["FS_RATE_LIMITED", true, 30]);
+});
+scenario("S17 Freshservice 401 is reported as an integration problem", () => {
+  const r = one(runQuote({ ticketId: 46 }, baseMocks({ ["GET " + FS + "/api/v2/tickets/46/requested_items"]: { status: 401, body: { code: "invalid_credentials", message: "You have to be logged in to perform this action." } } })));
+  eq([r.status, r.httpStatus, r.code, r.retryable], ["error", 502, "FS_AUTH", false]);
+  eq(r.error.detail, "You have to be logged in to perform this action.");
+});
+scenario("S18 no HTTP response at all is retryable", () => {
+  const r = one(runQuote({ ticketId: 46 }, baseMocks({ ["GET " + FS + "/api/v2/tickets/46/requested_items"]: { status: 0 } })));
+  eq([r.status, r.code, r.retryable, r.error.upstreamStatus], ["error", "FS_UNAVAILABLE", true, null]);
+});
+scenario("S19 UPS 400 with an empty text body still gives a message", () => {
+  const r = one(runQuote({ ticketId: 46 }, baseMocks({ [UPS_URL]: { status: 400, body: "" } })));
+  eq([r.status, r.code, r.message], ["invalid", "UPS_VALIDATION", "UPS rejected the shipment details."]);
+});
+
 scenario("S13 allowed services filter", () => {
   const r = one(runQuote({ ticketId: 46 }, baseMocks(), c => { c.allowedServiceCodes = ["03"]; }));
   eq(r.options.map(o => o.serviceCode), ["03"]); eq(r.options[0].tags, ["Lowest cost", "Fastest"]);
