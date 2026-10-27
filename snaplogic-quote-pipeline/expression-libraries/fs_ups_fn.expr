@@ -79,7 +79,7 @@
         },
         "ShipTo": {
           "Name": (cfg.defaults.receiverCompany != null && cfg.defaults.receiverCompany != '') ? cfg.defaults.receiverCompany : s.receiverName,
-          "Address": ({"AddressLine": [s.line1].filter(l => l != null && l != ''), "City": s.city, "StateProvinceCode": s.state, "PostalCode": s.zip, "CountryCode": cfg.sender.countryCode}).extend(s.residential == true ? {"ResidentialAddressIndicator": ""} : {})
+          "Address": ({"AddressLine": [s.line1].filter(l => l != null && l != ''), "City": s.city, "StateProvinceCode": s.state, "PostalCode": s.zip, "CountryCode": cfg.sender.countryCode}).extend(s.residential == true ? {"ResidentialAddressIndicator": "Y"} : {})
         },
         "PaymentDetails": {
           "ShipmentCharge": {"Type": "01", "BillShipper": {"AccountNumber": cfg.shipperNumber}}
